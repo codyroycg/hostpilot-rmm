@@ -152,6 +152,75 @@ canvas.addEventListener('wheel', (e) => {
   if (Math.abs(wheelAcc) >= 50) { send(`wh ${wheelAcc > 0 ? -120 : 120}`); wheelAcc = 0; }
 }, { passive: false });
 
+// ---------- touch (phones/tablets) ----------
+// tap = left click, long-press = right click, drag = left-button drag, two fingers = scroll wheel
+let touch = null;
+const LONG_PRESS = 550;
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (e.touches.length >= 2) {
+    if (touch) { clearTimeout(touch.timer); if (touch.down) send(`mu 0 ${touch.pos}`); }
+    touch = { two: true, y: (e.touches[0].clientY + e.touches[1].clientY) / 2, acc: 0 };
+    return;
+  }
+  const t = e.touches[0];
+  const pos = norm(t);
+  touch = { x: t.clientX, y: t.clientY, pos, moved: false, down: false, long: false };
+  send(`mm ${pos}`);
+  touch.timer = setTimeout(() => {
+    if (touch && !touch.moved && !touch.two) { touch.long = true; send(`md 2 ${pos}`); send(`mu 2 ${pos}`); if (navigator.vibrate) navigator.vibrate(15); }
+  }, LONG_PRESS);
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (!touch) return;
+  if (touch.two) {
+    if (e.touches.length < 2) return;
+    const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    touch.acc += touch.y - y; // fingers moving up scrolls the content down
+    touch.y = y;
+    while (Math.abs(touch.acc) >= 40) { send(`wh ${touch.acc > 0 ? -120 : 120}`); touch.acc -= Math.sign(touch.acc) * 40; }
+    return;
+  }
+  const t = e.touches[0];
+  if (!touch.moved && Math.hypot(t.clientX - touch.x, t.clientY - touch.y) > 8) {
+    touch.moved = true;
+    clearTimeout(touch.timer);
+    if (!touch.long) { send(`md 0 ${touch.pos}`); touch.down = true; }
+  }
+  if (touch.moved) { touch.pos = norm(t); send(`mm ${touch.pos}`); }
+}, { passive: false });
+const touchEnd = (e) => {
+  e.preventDefault();
+  if (!touch || e.touches.length) return; // wait until every finger is up
+  clearTimeout(touch.timer);
+  if (!touch.two) {
+    if (touch.down) send(`mu 0 ${touch.pos}`);
+    else if (!touch.long) { send(`md 0 ${touch.pos}`); send(`mu 0 ${touch.pos}`); }
+  }
+  touch = null;
+};
+canvas.addEventListener('touchend', touchEnd, { passive: false });
+canvas.addEventListener('touchcancel', touchEnd, { passive: false });
+
+// On-screen keyboard: a hidden text field receives the phone keyboard's input.
+const kbd = $('#r-kbd');
+const tapKey = (vk) => { send(`kd ${vk}`); send(`ku ${vk}`); };
+$('#r-kbd-btn').addEventListener('click', () => { kbd.value = ''; kbd.focus(); });
+kbd.addEventListener('beforeinput', (e) => {
+  e.preventDefault();
+  if (e.inputType === 'insertText' || e.inputType === 'insertCompositionText' || e.inputType === 'insertReplacementText') {
+    if (e.data) send(`type ${btoa(String.fromCharCode(...new TextEncoder().encode(e.data)))}`);
+  } else if (e.inputType === 'deleteContentBackward') tapKey(8);
+  else if (e.inputType === 'deleteContentForward') tapKey(46);
+  else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') tapKey(13);
+});
+kbd.addEventListener('keydown', (e) => {
+  // keys that don't produce text (Android reports printable keys as keyCode 229, handled by beforeinput)
+  const vk = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46 }[e.key];
+  if (vk) { e.preventDefault(); tapKey(vk); }
+});
+
 // ---------- keyboard ----------
 canvas.addEventListener('keydown', (e) => {
   const vk = VK[e.code];

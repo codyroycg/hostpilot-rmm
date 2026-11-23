@@ -49,6 +49,50 @@ function password(a, required) {
 }
 const base = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
 
+// ---------- firewall rule validation ----------
+const PORTS = /^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*$/;
+const ADDRS = /^[A-Za-z0-9:.\/-]+(,[A-Za-z0-9:.\/-]+)*$/;
+const oneOf = (v, list, label) => { if (!list.includes(v)) throw new HttpError(400, `Invalid ${label}`); return v; };
+const noCtl = (v, max, label) => { const s = S(v, max + 1); if (s.length > max || /[\x00-\x1f]/.test(s)) throw new HttpError(400, `${label} is too long or has invalid characters`); return s.trim(); };
+function fwPorts(v, label) {
+  const s = S(v, 300).replace(/\s+/g, '').toLowerCase();
+  if (!s || s === 'any') return s;
+  if (!PORTS.test(s) || s.split(/[,-]/).some((n) => Number(n) < 1 || Number(n) > 65535)) throw new HttpError(400, `${label}: use numbers 1-65535, ranges (1000-2000) or a comma list`);
+  return s;
+}
+function fwId(a) { return need(noCtl(a.id, 1000, 'Rule id'), 'Rule id'); }
+/** full=true: create/modify with every field; full=false: only fields that were sent (enable/disable). */
+function fwArgs(a, platform, isNew) {
+  const out = {};
+  const has = (k) => a[k] !== undefined && a[k] !== null;
+  if (isNew || has('direction')) {
+    out.name = need(noCtl(a.name, 200, 'Name'), 'Name');
+    out.direction = oneOf(S(a.direction), ['in', 'out'], 'direction');
+    out.action = oneOf(S(a.action), ['allow', 'block'], 'action');
+    out.protocol = oneOf(S(a.protocol || 'any').toLowerCase(), ['any', 'tcp', 'udp', 'icmpv4', 'icmpv6'], 'protocol');
+    out.local_port = fwPorts(a.local_port, 'Local port') || 'any';
+    out.remote_port = fwPorts(a.remote_port, 'Remote port') || 'any';
+    if ((out.local_port !== 'any' || out.remote_port !== 'any') && !['tcp', 'udp'].includes(out.protocol)) throw new HttpError(400, 'Ports need protocol TCP or UDP');
+    const addr = S(a.remote_address, 1000).replace(/\s+/g, '');
+    if (addr && addr.toLowerCase() !== 'any' && !ADDRS.test(addr)) throw new HttpError(400, 'Remote address: use IPs, subnets (10.0.0.0/8), ranges or keywords like LocalSubnet, comma-separated');
+    out.remote_address = !addr || addr.toLowerCase() === 'any' ? 'any' : addr;
+    if (platform === 'windows') {
+      out.program = noCtl(a.program, 260, 'Program');
+      out.program_set = '1';
+      const prof = S(a.profile || 'any').toLowerCase().split(',').map((x) => x.trim()).filter(Boolean);
+      if (!prof.length || prof.includes('any')) out.profile = 'any';
+      else { prof.forEach((x) => oneOf(x, ['domain', 'private', 'public'], 'profile')); out.profile = prof.join(','); }
+      out.description = noCtl(a.description, 500, 'Description');
+      out.description_set = '1';
+    } else if (out.remote_port !== 'any') {
+      throw new HttpError(400, 'Remote ports are only supported on Windows');
+    }
+  }
+  if (isNew || has('enabled')) out.enabled = flag(a.enabled ?? true) || '1';
+  if (!isNew && !Object.keys(out).length) throw new HttpError(400, 'Nothing to change');
+  return out;
+}
+
 /**
  * title(args) -> job name; args(raw, platform) -> validated {key: string}; timeout seconds;
  * wait: seconds the API call waits for a result (0 = return immediately);
@@ -116,6 +160,18 @@ export const TASKS = {
       return { name, remove_home: flag(a.remove_home) || '0' };
     },
   },
+
+  'hardware.disks': { title: () => 'Read disk health (SMART)', timeout: 180, wait: 120, args: () => ({}) },
+  'hardware.usb': { title: () => 'List USB devices', timeout: 120, wait: 90, args: () => ({}) },
+  'hardware.printers': { title: () => 'List printers and scanners', timeout: 120, wait: 90, args: () => ({}) },
+
+  'fw.list': { title: () => 'List firewall rules', timeout: 180, wait: 120, args: () => ({}) },
+  'fw.create': { title: (a) => `Create firewall rule ${a.name}`, timeout: 120, wait: 60, args: (a, p) => fwArgs(a, p, true) },
+  'fw.update': {
+    title: (a) => (a.direction ? `Modify firewall rule ${a.name || a.id}` : `${a.enabled === '1' ? 'Enable' : 'Disable'} firewall rule ${a.id}`),
+    timeout: 120, wait: 60, args: (a, p) => ({ id: fwId(a), ...fwArgs(a, p, false) }),
+  },
+  'fw.delete': { title: (a) => `Delete firewall rule ${a.id}`, timeout: 120, wait: 60, args: (a) => ({ id: fwId(a) }) },
 
   'metrics.live': { internal: true, title: () => 'Live performance monitor', timeout: 3600, args: (a) => ({ url: S(a.url) }) },
   'terminal.open': { internal: true, title: () => 'Terminal session', timeout: 12 * 3600, args: (a) => ({ in: S(a.in), out: S(a.out), close: S(a.close) }) },

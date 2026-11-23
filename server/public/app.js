@@ -169,6 +169,7 @@ function renderShell() {
       <div class="brand"><img src="/favicon.svg" alt="">HostPilot RMM</div>
       <nav class="nav">${NAV.map((n) => (n ? `<a href="${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? '<span class="badge hidden" id="nav-alerts"></span>' : ''}</a>` : '<div class="sep"></div>')).join('')}</nav>
     </aside>
+    <div class="sidebar-scrim" data-action="toggle-menu"></div>
     <div class="main">
       <header class="topbar">
         <div class="row"><button class="btn sm menu-toggle" data-action="toggle-menu">☰</button><strong id="page-title"></strong></div>
@@ -385,7 +386,7 @@ async function pageDevices(view) {
 async function pageDevice(view, id, tab = 'overview') {
   const a = await api('GET', `/api/agents/${id}`);
   const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['updates', 'Updates'], ['software', 'Software'],
-    ['users', 'Users'], ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+    ['users', 'Users'], ['hardware', 'Hardware'], ['firewall', 'Firewall'], ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
   view.innerHTML = `
     <div class="page-head"><div>
       <h1>${statusDot(a)}${esc(a.hostname)}</h1>
@@ -398,6 +399,7 @@ async function pageDevice(view, id, tab = 'overview') {
   const el = $('#tab');
   const fn = {
     overview: devOverview, terminal: devTerminal, files: devFiles, updates: devUpdates, software: devSoftware, users: devUsers,
+    hardware: devHardware, firewall: devFirewall,
     jobs: devJobs, alerts: devAlerts, settings: devSettings,
   }[tab] || devOverview;
   await fn(el, a);
@@ -421,7 +423,9 @@ async function devOverview(el, a) {
     </dl></div>
     <div class="card"><h3>Utilization</h3>
       <dl class="kv">${kv('CPU', meter(a.cpu_pct))}${kv('Memory', meter(a.mem_pct))}
-      ${(a.disks || []).map((d) => kv(esc(d.mount), `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`)).join('')}</dl></div>
+      ${(a.disks || []).map((d) => kv(can('tech') ? `<a href="#/devices/${a.id}/files" data-action="open-drive" data-id="${a.id}" data-path="${esc(drivePath(a, d.mount))}" title="Browse in Files">${esc(d.mount)}</a>` : esc(d.mount),
+        `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`)).join('')}</dl>
+      ${can('tech') ? `<div class="small muted">Click a drive to browse it · <a href="#/devices/${a.id}/hardware">Disk health & details</a></div>` : ''}</div>
     ${chartCard('perf', 'Performance')}
     ${chartCard('net', 'Network traffic')}
     <div class="card" style="grid-column:1/-1"><h3>Network interfaces</h3>${ifaceTable(a.net_ifaces)}</div>
@@ -650,6 +654,8 @@ async function pollJob(id, onTick) {
 
 // ---------------- files ----------------
 const isWin = (a) => a.platform === 'windows';
+// "C:" -> "C:\" ; Linux mount points are already paths
+const drivePath = (a, mount) => (isWin(a) && /^[A-Za-z]:$/.test(mount) ? `${mount}\\` : mount);
 function fsJoin(a, dir, name) {
   if (isWin(a)) return dir ? `${dir.replace(/\\+$/, '')}\\${name}` : name;
   return dir === '/' ? `/${name}` : `${dir.replace(/\/+$/, '')}/${name}`;
@@ -952,6 +958,231 @@ async function devUsers(el, a) {
     }
   }));
   await load();
+}
+
+// ---------------- hardware: disks (SMART), USB, printers & scanners ----------------
+const USB_VENDORS = {
+  '03f0': 'HP', '0403': 'FTDI', '040a': 'Kodak', '041e': 'Creative', '0424': 'Microchip (SMSC)', '0451': 'Texas Instruments', '045e': 'Microsoft', '046a': 'Cherry',
+  '046d': 'Logitech', '04a9': 'Canon', '04b8': 'Epson', '04d9': 'Holtek', '04e6': 'Identiv', '04e8': 'Samsung', '04f2': 'Chicony', '04f9': 'Brother',
+  '0502': 'Acer', '0518': 'EzKEY', '054c': 'Sony', '056a': 'Wacom', '05ac': 'Apple', '05e3': 'Genesys Logic', '0624': 'Avocent', '067b': 'Prolific',
+  '06cb': 'Synaptics', '0781': 'SanDisk', '07ca': 'AVerMedia', '0846': 'NETGEAR', '08bb': 'Texas Instruments (audio)', '090c': 'Silicon Motion', '0930': 'Toshiba',
+  '0951': 'Kingston', '0a12': 'Cambridge Silicon Radio', '0a5c': 'Broadcom', '0b05': 'ASUS', '0b95': 'ASIX', '0bc2': 'Seagate', '0bda': 'Realtek', '0c45': 'Microdia',
+  '0cf3': 'Qualcomm Atheros', '0d8c': 'C-Media', '0e6f': 'PDP', '0e8d': 'MediaTek', '0fd9': 'Elgato', '1050': 'Yubico', '1058': 'Western Digital', '10c4': 'Silicon Labs',
+  '1209': 'Generic (pid.codes)', '13fe': 'Phison', '1395': 'Sennheiser', '1462': 'MSI', '152a': 'Thesycon / XMOS', '1532': 'Razer', '154b': 'PNY', '1631': 'Good Way',
+  '17ef': 'Lenovo', '18d1': 'Google', '1915': 'Nordic Semiconductor', '1a40': 'Terminus Technology', '1a86': 'QinHeng (CH340)', '1b1c': 'Corsair', '1d6b': 'Linux Foundation',
+  '1e71': 'NZXT', '2109': 'VIA Labs', '2357': 'TP-Link', '2516': 'Cooler Master', '258a': 'SINO WEALTH', '2717': 'Xiaomi', '22b8': 'Motorola', '2a70': 'OnePlus',
+  '2f96': 'Ugreen', '3297': 'ZSA', '413c': 'Dell', '8087': 'Intel', '8086': 'Intel', '8564': 'Transcend', '0c76': 'JMTek', '2833': 'Oculus',
+  '28de': 'Valve', '0079': 'DragonRise', '1038': 'SteelSeries', '0b0e': 'Jabra', '047f': 'Plantronics (Poly)', '0d8d': 'Generic audio', '048d': 'ITE Tech', '1d50': 'OpenMoko',
+};
+const DISK_MAKERS = [[/^samsung/i, 'Samsung'], [/^(wdc|wd[ _]|western)/i, 'Western Digital'], [/^(st\d|seagate)/i, 'Seagate'], [/^toshiba|^kioxia/i, 'Toshiba / Kioxia'],
+  [/^(ct\d|crucial)/i, 'Crucial'], [/^kingston|^sa400|^suv|^skc|^sedc/i, 'Kingston'], [/^intel|^ssdpe|^ssdsc/i, 'Intel'], [/^sandisk|^sd[0-9a-z]{2}/i, 'SanDisk'],
+  [/^micron|^mtfd/i, 'Micron'], [/^(hgst|hitachi|hds|hus)/i, 'HGST / Hitachi'], [/^sk ?hynix|^hfs|^hfm/i, 'SK hynix'], [/^adata|^asx|^su\d/i, 'ADATA'],
+  [/^corsair/i, 'Corsair'], [/^lexar/i, 'Lexar'], [/^transcend|^ts\d/i, 'Transcend'], [/^(pny|cs\d{4})/i, 'PNY'], [/^mkn|^mushkin/i, 'Mushkin'], [/^phison|^ps\d/i, 'Phison'],
+  [/^teamgroup|^t-force|^team/i, 'TEAMGROUP'], [/^patriot/i, 'Patriot'], [/^(msft|microsoft) virtual/i, 'Microsoft (virtual)'], [/^vmware/i, 'VMware (virtual)'],
+  [/^qemu/i, 'QEMU (virtual)'], [/^virtual|^vbox/i, 'Virtual disk'], [/^apple/i, 'Apple'], [/^lenovo/i, 'Lenovo'], [/^hp\b|^hewlett/i, 'HP'], [/^dell/i, 'Dell'],
+  [/^nvme ?(ca|ss)/i, ''], [/^wd/i, 'Western Digital'], [/^my passport|^elements|^easystore/i, 'Western Digital']];
+function diskMake(make, model) {
+  const m = String(make || '').trim();
+  if (m && !/^\(standard|^ata$|^nvme$|^usb$/i.test(m)) return m === 'WD' ? 'Western Digital' : m;
+  const hit = DISK_MAKERS.find(([re]) => re.test(String(model || '').trim()));
+  return hit ? hit[1] : '';
+}
+const fmtHours = (h) => (h === '' || h == null ? '' : `${Number(h).toLocaleString()} h <span class="muted">(${(Number(h) / 8766).toFixed(1)} years)</span>`);
+const HEALTH_BADGE = { OK: ['Healthy', 'ok'], Warning: ['Warning', 'warn'], Failing: ['Failing', 'bad'], Unknown: ['Unknown', ''] };
+
+async function devHardware(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">Hardware details require the tech role.</div>'; return; }
+  const section = (id, title, extra = '') => `<div class="card" id="${id}" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;margin-bottom:10px">
+    <h3 style="margin:0">${title}</h3><div class="row">${extra}<button class="btn sm" data-hw-refresh="${id}">Refresh</button></div></div><div class="hw-body muted">Loading…</div></div>`;
+  el.innerHTML = section('hw-disks', 'Disks')
+    + section('hw-usb', 'USB devices', `<label class="check small"><input type="checkbox" id="usb-hubs"> Show hubs</label>
+        <select id="usb-filter" style="width:auto"><option value="all">Connected & previously connected</option><option value="on">Connected only</option><option value="off">Not connected only</option></select>`)
+    + section('hw-print', 'Printers & scanners');
+  const body = (id) => $(`#${id} .hw-body`);
+  const fail = (id, err) => { body(id).innerHTML = `<div class="small" style="color:var(--bad)">${esc(err.message)}</div>`; };
+
+  const loadDisks = async () => {
+    body('hw-disks').innerHTML = '<div class="muted">Reading disks and SMART data…</div>';
+    try {
+      const j = await deviceTask(a.id, 'hardware.disks');
+      const disks = parseTsv(j.stdout, 'D').map(([id, make, model, serial, size, media, bus, health, temp, poh, wear, realloc, errs, vols, fw, note]) =>
+        ({ id, make: diskMake(make, model), model, serial, size: Number(size), media, bus, health, temp, poh, wear, realloc, errs, vols: (vols || '').split(' ').filter(Boolean), fw, note }));
+      const kv = (k, v) => (v === '' || v == null ? '' : `<dt>${k}</dt><dd>${v}</dd>`);
+      body('hw-disks').innerHTML = disks.length ? `<div class="grid cols-2">${disks.map((d) => {
+        const [hl, hc] = HEALTH_BADGE[d.health] || HEALTH_BADGE.Unknown;
+        const vols = d.vols.map((v) => `<a href="#" data-action="open-drive" data-id="${a.id}" data-path="${esc(drivePath(a, v))}">${esc(v)}</a>`).join(' ');
+        return `<div class="card" style="background:var(--panel-2)"><div class="row" style="justify-content:space-between;margin-bottom:8px">
+            <strong>${esc((d.make && !d.model.toLowerCase().startsWith(d.make.toLowerCase().split(' ')[0]) ? `${d.make} ${d.model}` : d.model) || `Disk ${d.id}`)}</strong><span class="row">${badge(hl, hc)}${d.media ? badge(d.media, 'info') : ''}</span></div>
+          <dl class="kv">${kv('Make', esc(d.make))}${kv('Model', esc(d.model))}${kv('Serial number', `<span class="mono">${esc(d.serial)}</span>`)}${kv('Capacity', fmtBytes(d.size))}
+            ${kv('Interface', esc(d.bus))}${kv('Firmware', esc(d.fw))}${kv(isWin(a) ? 'Drives' : 'Mounted at', vols)}
+            ${kv('Temperature', d.temp ? `${esc(d.temp)} °C` : '')}${kv('Powered on', fmtHours(d.poh))}
+            ${kv('Life used', d.wear !== '' ? `${meter(Number(d.wear))}` : '')}${kv('Reallocated sectors', esc(d.realloc))}${kv('Uncorrected errors', esc(d.errs))}</dl>
+          ${d.note ? `<div class="small muted" style="margin-top:8px">${esc(d.note)}</div>` : ''}</div>`;
+      }).join('')}</div>` : '<div class="muted">No physical disks reported.</div>';
+    } catch (err) { fail('hw-disks', err); }
+  };
+
+  let usb = [];
+  const drawUsb = () => {
+    const hubs = $('#usb-hubs').checked, f = $('#usb-filter').value;
+    const rows = usb.filter((u) => (hubs || !u.hub) && (f === 'all' || (f === 'on') === u.on))
+      .sort((x, y) => (y.on - x.on) || (y.arrived - x.arrived) || x.name.localeCompare(y.name));
+    const n = usb.filter((u) => !u.hub);
+    body('hw-usb').innerHTML = `<div class="small muted" style="margin-bottom:8px">${n.filter((u) => u.on).length} connected · ${n.filter((u) => !u.on).length} previously connected${isWin(a) ? '' : ' (from the kernel log)'}</div>
+      <div class="table-wrap"><table class="rtable"><thead><tr><th>Status</th><th>Device</th><th>Manufacturer</th><th>Type</th><th>VID:PID</th><th>Serial</th><th>Last connected</th></tr></thead><tbody>
+      ${rows.map((u) => `<tr><td data-label="Status">${u.on ? badge('Connected', 'ok') : badge('Not connected')}</td><td data-label="Device"><strong>${esc(u.name || 'Unknown device')}</strong></td>
+        <td data-label="Manufacturer">${esc(u.make) || '<span class="muted">—</span>'}</td><td data-label="Type">${esc(u.cls)}</td>
+        <td data-label="VID:PID" class="mono small">${esc(u.vid)}:${esc(u.pid)}</td><td data-label="Serial" class="mono small">${esc(u.serial) || '<span class="muted">—</span>'}</td>
+        <td data-label="Last connected" class="small nowrap">${u.on ? 'now' : u.arrived ? fmtAgo(u.arrived) : '<span class="muted">unknown</span>'}</td></tr>`).join('')
+        || '<tr><td colspan="7" class="empty">No USB devices</td></tr>'}</tbody></table></div>`;
+  };
+  const loadUsb = async () => {
+    body('hw-usb').innerHTML = '<div class="muted">Listing USB devices…</div>';
+    try {
+      const j = await deviceTask(a.id, 'hardware.usb');
+      usb = parseTsv(j.stdout, 'U').map(([on, name, mfr, cls, vid, pid, serial, hub, arr]) => ({
+        on: on === '1', name, make: mfr || USB_VENDORS[String(vid).toLowerCase()] || '', cls: cls === 'HIDClass' ? 'Input (HID)' : cls,
+        vid: String(vid).toLowerCase(), pid: String(pid).toLowerCase(), serial, hub: hub === '1', arrived: Number(arr) * 1000 || 0 }));
+      drawUsb();
+    } catch (err) { fail('hw-usb', err); }
+  };
+
+  const loadPrinters = async () => {
+    body('hw-print').innerHTML = '<div class="muted">Listing printers and scanners…</div>';
+    try {
+      const j = await deviceTask(a.id, 'hardware.printers');
+      const queues = parseTsv(j.stdout, 'P').map(([name, driver, port, status, conn, shared, def, loc, virt]) => ({ name, driver, port, status, conn, shared: shared === '1', def: def === '1', loc, virt: virt === '1' }));
+      const hw = parseTsv(j.stdout, 'H').map(([kind, on, name, mfr, arr]) => ({ kind, on: on === '1', name, mfr, arrived: Number(arr) * 1000 || 0 }));
+      const note = parseTsv(j.stdout, 'NOTE').map(([t]) => t);
+      const connCell = (q) => (q.virt ? badge('Virtual') : q.conn === '1' ? badge('Connected', 'ok') : badge('Not connected', 'bad'));
+      body('hw-print').innerHTML = `${note.map((t) => `<div class="small muted">${esc(t)}</div>`).join('')}
+        <div class="small muted" style="margin:4px 0 6px">Printers (print queues)</div>
+        <div class="table-wrap"><table class="rtable"><thead><tr><th>Name</th><th>Connection</th><th>Status</th><th>Driver / model</th><th>Port</th><th>Shared</th></tr></thead><tbody>
+        ${queues.sort((x, y) => (x.virt - y.virt) || x.name.localeCompare(y.name)).map((q) => `<tr><td data-label="Name"><div><strong>${esc(q.name)}</strong>${q.def ? ' ' + badge('default', 'info') : ''}${q.loc ? `<div class="small muted">${esc(q.loc)}</div>` : ''}</div></td>
+          <td data-label="Connection">${connCell(q)}</td><td data-label="Status" class="small">${esc(q.status)}</td><td data-label="Driver" class="small">${esc(q.driver)}</td>
+          <td data-label="Port" class="small mono">${esc(q.port)}</td><td data-label="Shared">${q.shared ? 'Yes' : 'No'}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">No printers</td></tr>'}
+        </tbody></table></div>
+        <div class="small muted" style="margin:14px 0 6px">Printer & scanner hardware</div>
+        <div class="table-wrap"><table class="rtable"><thead><tr><th>Type</th><th>Device</th><th>Manufacturer</th><th>Status</th><th>Last connected</th></tr></thead><tbody>
+        ${hw.sort((x, y) => (y.on - x.on) || x.kind.localeCompare(y.kind)).map((h) => `<tr><td data-label="Type">${h.kind === 'scanner' ? 'Scanner' : 'Printer'}</td><td data-label="Device"><strong>${esc(h.name)}</strong></td>
+          <td data-label="Manufacturer">${esc(h.mfr) || '<span class="muted">—</span>'}</td><td data-label="Status">${h.on ? badge('Connected', 'ok') : badge('Not connected')}</td>
+          <td data-label="Last connected" class="small">${h.on ? 'now' : h.arrived ? fmtAgo(h.arrived) : '<span class="muted">unknown</span>'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">None found</td></tr>'}
+        </tbody></table></div>`;
+    } catch (err) { fail('hw-print', err); }
+  };
+
+  const loaders = { 'hw-disks': loadDisks, 'hw-usb': loadUsb, 'hw-print': loadPrinters };
+  el.addEventListener('click', (e) => { const b = e.target.closest('[data-hw-refresh]'); if (b) guard(loaders[b.dataset.hwRefresh])(); });
+  $('#usb-hubs').addEventListener('change', drawUsb);
+  $('#usb-filter').addEventListener('change', drawUsb);
+  await Promise.all([loadDisks(), loadUsb(), loadPrinters()]);
+}
+
+// ---------------- firewall ----------------
+async function devFirewall(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">Firewall management requires the tech role.</div>'; return; }
+  el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="row" style="justify-content:space-between"><h3 style="margin:0">Firewall</h3>
+      <span class="muted small" id="fw-status">Loading…</span></div><div id="fw-profiles" class="row" style="margin-top:10px"></div></div>
+    <div class="toolbar"><input type="search" id="fw-q" placeholder="Search name, port, address, program…">
+      <select id="fw-dir"><option value="">In & out</option><option value="in">Inbound</option><option value="out">Outbound</option></select>
+      <select id="fw-show"><option value="enabled">Enabled rules</option><option value="all">All rules</option><option value="custom">Custom rules (no group)</option><option value="block">Block rules</option></select>
+      <span class="grow"></span><button class="btn sm" id="fw-refresh">Refresh</button><button class="btn primary" id="fw-new">New rule</button></div>
+    <div class="card flush"><div class="table-wrap"><table class="rtable"><thead><tr><th>Name</th><th>Direction</th><th>Action</th><th>Protocol / ports</th><th>Remote address</th>${isWin(a) ? '<th>Program</th><th>Profiles</th>' : ''}<th>Enabled</th><th></th></tr></thead>
+      <tbody id="fw-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div></div>
+    <p class="small muted" id="fw-foot"></p>`;
+  let rules = [], backend = isWin(a) ? 'windows' : '';
+  const managed = () => isWin(a) || ['ufw', 'firewalld'].includes(backend);
+  const draw = () => {
+    const q = $('#fw-q').value.toLowerCase(), dir = $('#fw-dir').value, show = $('#fw-show').value;
+    const list = rules.filter((r) => (!dir || r.dir === dir)
+      && (show === 'all' || (show === 'enabled' && r.enabled) || (show === 'custom' && !r.group) || (show === 'block' && r.action === 'block'))
+      && (!q || [r.name, r.lport, r.rport, r.raddr, r.program, r.group, r.proto, r.desc].join(' ').toLowerCase().includes(q)));
+    const shown = list.slice(0, 400);
+    $('#fw-body').innerHTML = shown.map((r, i) => {
+      const ro = r.source !== 'local' || !managed();
+      const ports = r.proto === 'Any' || r.proto === 'any' ? 'Any' : `${esc(r.proto)}${r.lport && r.lport.toLowerCase() !== 'any' ? ` ${esc(r.lport)}` : ''}${r.rport && r.rport.toLowerCase() !== 'any' ? ` → ${esc(r.rport)}` : ''}`;
+      return `<tr data-i="${rules.indexOf(r)}"><td data-label="Name"><div><strong>${esc(r.name || r.id)}</strong>${r.group ? `<div class="small muted">${esc(r.group)}</div>` : ''}</div></td>
+        <td data-label="Direction">${r.dir === 'out' ? 'Outbound' : 'Inbound'}</td><td data-label="Action">${r.action === 'block' ? badge('Block', 'bad') : badge('Allow', 'ok')}</td>
+        <td data-label="Protocol / ports" class="small">${ports}</td><td data-label="Remote address" class="small mono">${esc(r.raddr || 'Any')}</td>
+        ${isWin(a) ? `<td data-label="Program" class="small" title="${esc(r.program)}">${esc(r.program ? r.program.split('\\').pop() : '')}</td><td data-label="Profiles" class="small">${esc(r.profiles)}</td>` : ''}
+        <td data-label="Enabled">${ro || !isWin(a) ? (r.enabled ? 'Yes' : 'No') : `<label class="switch"><input type="checkbox" data-fw="toggle" ${r.enabled ? 'checked' : ''}><span></span></label>`}</td>
+        <td class="right nowrap">${ro ? `<span class="small muted">${r.source === 'gpo' ? 'Group Policy' : 'read-only'}</span>` : '<button class="btn sm" data-fw="edit">Edit</button> <button class="btn sm danger" data-fw="delete">Delete</button>'}</td></tr>`;
+    }).join('') || '<tr><td colspan="9" class="empty">No matching rules</td></tr>';
+    $('#fw-foot').textContent = `${list.length} of ${rules.length} rules shown${list.length > shown.length ? ' (first 400; search to narrow down)' : ''}.`;
+  };
+  const load = async () => {
+    $('#fw-status').textContent = 'Loading…';
+    try {
+      const j = await deviceTask(a.id, 'fw.list');
+      backend = parseTsv(j.stdout, 'B')[0]?.[0] || backend;
+      const profs = parseTsv(j.stdout, 'F');
+      rules = parseTsv(j.stdout, 'R').map(([id, name, en, dir, action, proto, lport, rport, raddr, program, profiles, group, source, desc]) =>
+        ({ id, name, enabled: en === '1', dir, action, proto, lport, rport, raddr, program, profiles, group, source, desc }));
+      $('#fw-profiles').innerHTML = profs.map(([name, on, din, dout]) => `<span class="badge ${on === '1' ? 'ok' : 'bad'}">${esc(name)}: ${on === '1' ? 'on' : 'off'}</span>
+        ${din ? `<span class="small muted">in: ${esc(din)} · out: ${esc(dout)}</span>` : ''}`).join(' ');
+      $('#fw-status').textContent = isWin(a) ? 'Windows Defender Firewall' : ({ ufw: 'ufw', firewalld: 'firewalld', 'ufw-inactive': 'ufw (not enabled)', nftables: 'nftables (read-only)', iptables: 'iptables (read-only)', none: 'No firewall found' }[backend] || backend);
+      $('#fw-new').disabled = !managed();
+      if (!managed()) $('#fw-foot').textContent = 'Rule management needs ufw or firewalld on Linux.';
+    } catch (err) { $('#fw-status').textContent = err.message; }
+    draw();
+  };
+  ['fw-q', 'fw-dir', 'fw-show'].forEach((id) => $(`#${id}`).addEventListener('input', draw));
+  $('#fw-refresh').addEventListener('click', guard(load));
+  const save = async (task, args, msg) => { const j = await deviceTask(a.id, task, args); toast(msg || (j.stdout || 'Done').trim().split('\n').pop()); await load(); };
+  $('#fw-new').addEventListener('click', () => fwRuleModal(a, null, guard(async (vals) => { await save('fw.create', vals); closeModal(); })));
+  $('#fw-body').addEventListener('change', guard(async (e) => {
+    const c = e.target.closest('[data-fw="toggle"]');
+    if (!c) return;
+    const r = rules[Number(c.closest('tr').dataset.i)];
+    c.disabled = true;
+    try { await save('fw.update', { id: r.id, enabled: c.checked }, `${c.checked ? 'Enabled' : 'Disabled'} "${r.name}"`); } catch (err) { c.checked = !c.checked; c.disabled = false; throw err; }
+  }));
+  $('#fw-body').addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-fw]');
+    if (!b || b.dataset.fw === 'toggle') return;
+    const r = rules[Number(b.closest('tr').dataset.i)];
+    if (b.dataset.fw === 'edit') fwRuleModal(a, r, guard(async (vals) => { await save('fw.update', { id: r.id, ...vals }); closeModal(); }));
+    if (b.dataset.fw === 'delete' && await confirmDialog(`Delete the firewall rule "${r.name || r.id}" on ${a.hostname}?`, { okLabel: 'Delete', danger: true })) await save('fw.delete', { id: r.id });
+  }));
+  await load();
+}
+
+function fwRuleModal(a, r, onSubmit) {
+  const win = isWin(a);
+  const v = r || { name: '', dir: 'in', action: 'allow', proto: 'TCP', lport: '', rport: '', raddr: '', program: '', profiles: 'Any', enabled: true, desc: '' };
+  const sel = (name, opts, cur) => `<select name="${name}">${opts.map(([val, label]) => `<option value="${val}" ${String(cur).toLowerCase() === val ? 'selected' : ''}>${label}</option>`).join('')}</select>`;
+  const anyBlank = (s) => (!s || String(s).toLowerCase() === 'any' ? '' : s);
+  const profs = String(v.profiles || 'Any').toLowerCase();
+  const m = openModal(r ? 'Edit firewall rule' : `New firewall rule on ${a.hostname}`, `<form id="fw-form">
+    <div class="field"><label>Name</label><input type="text" name="name" required maxlength="200" value="${esc(v.name)}"></div>
+    <div class="form-grid">
+      <div class="field"><label>Direction</label>${sel('direction', [['in', 'Inbound (to this device)'], ['out', 'Outbound (from this device)']], v.dir)}</div>
+      <div class="field"><label>Action</label>${sel('action', [['allow', 'Allow'], ['block', 'Block']], v.action)}</div>
+      <div class="field"><label>Protocol</label>${sel('protocol', [['tcp', 'TCP'], ['udp', 'UDP'], ['any', 'Any'], ['icmpv4', 'ICMPv4 (ping)'], ['icmpv6', 'ICMPv6']], String(v.proto).toLowerCase())}</div>
+    </div>
+    <div class="form-grid">
+      <div class="field"><label>Local port(s)</label><input type="text" name="local_port" value="${esc(anyBlank(v.lport))}" placeholder="Any, or 443, 8000-8100, 80,443"></div>
+      ${win ? `<div class="field"><label>Remote port(s)</label><input type="text" name="remote_port" value="${esc(anyBlank(v.rport))}" placeholder="Any"></div>` : ''}
+    </div>
+    <div class="field"><label>Remote address(es)</label><input type="text" name="remote_address" value="${esc(anyBlank(v.raddr))}" placeholder="Any, or 192.168.1.0/24, 10.0.0.5${win ? ', LocalSubnet' : ''}"></div>
+    ${win ? `<div class="field"><label>Program (optional)</label><input type="text" name="program" value="${esc(v.program)}" placeholder="C:\\Program Files\\App\\app.exe"></div>
+      <div class="field"><label>Profiles</label><div class="row">${['domain', 'private', 'public'].map((p) => `<label class="check"><input type="checkbox" name="prof_${p}" ${profs === 'any' || profs.includes(p) ? 'checked' : ''}> ${p[0].toUpperCase() + p.slice(1)}</label>`).join('')}</div></div>
+      <div class="field"><label>Description (optional)</label><input type="text" name="description" maxlength="500" value="${esc(v.desc)}"></div>
+      <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? 'checked' : ''}> Enabled</label>`
+    : '<p class="small muted">On Linux the rule is added with ufw or firewalld. The name is stored as the rule comment (ufw).</p>'}
+    </form>`, { foot: `<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="fw-form">${r ? 'Save changes' : 'Create rule'}</button>` });
+  $('#fw-form', m).addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    const val = (n) => f.namedItem(n)?.value.trim() ?? '';
+    const vals = { name: val('name'), direction: val('direction'), action: val('action'), protocol: val('protocol'), local_port: val('local_port') || 'any', remote_address: val('remote_address') || 'any' };
+    if (win) {
+      const ps = ['domain', 'private', 'public'].filter((p) => f.namedItem(`prof_${p}`).checked);
+      if (!ps.length) { toast('Pick at least one profile', 'error'); return; }
+      Object.assign(vals, { remote_port: val('remote_port') || 'any', program: val('program'), profile: ps.length === 3 ? 'any' : ps.join(','), description: val('description'), enabled: f.namedItem('enabled').checked });
+    }
+    onSubmit(vals);
+  });
 }
 
 function userFormModal(a, existing, onSubmit) {
@@ -1522,6 +1753,11 @@ const ACTIONS = {
       if (r.created) location.hash = `#/jobs/batch/${r.batch_id}`;
     }).catch((e) => toast(e.message, 'error'));
   }),
+  'open-drive': (el) => {
+    if (!state.files) state.files = new Map();
+    state.files.set(el.dataset.id, { path: el.dataset.path });
+    location.hash = `#/devices/${el.dataset.id}/files`;
+  },
   'update-agent': async (el) => {
     const r = await api('POST', `/api/agents/${el.dataset.id}/update-agent`);
     toast('Agent update queued. The device restarts its agent and reconnects within a minute.');
@@ -1596,7 +1832,31 @@ document.addEventListener('click', (e) => {
 }, true);
 
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
-window.addEventListener('hashchange', router);
+window.addEventListener('hashchange', () => { $('#sidebar')?.classList.remove('open'); router(); });
+
+// Phones: tables become stacked cards (see table.rtable in styles.css). Label every cell with its column
+// header, so any table rendered anywhere in the app works without per-table markup.
+function labelTables(root) {
+  for (const table of root.querySelectorAll('table')) {
+    const ths = table.tHead ? [...table.tHead.rows[0]?.cells || []] : [];
+    if (!ths.length) continue;
+    table.classList.add('rtable');
+    const names = ths.map((th) => th.textContent.trim());
+    for (const tr of table.tBodies[0]?.rows || []) {
+      let col = 0;
+      for (const td of tr.cells) {
+        if (!td.hasAttribute('data-label') && !td.classList.contains('empty')) td.setAttribute('data-label', names[col] || '');
+        col += td.colSpan || 1;
+      }
+    }
+  }
+}
+let labelQueued = false;
+new MutationObserver(() => {
+  if (labelQueued) return;
+  labelQueued = true;
+  requestAnimationFrame(() => { labelQueued = false; labelTables(document.body); });
+}).observe(document.body, { childList: true, subtree: true });
 
 // ---------------- boot ----------------
 (async () => {

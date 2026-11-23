@@ -33,6 +33,7 @@
         <option value="91,69">Win+E (Explorer)</option>
         <option value="44">Print Screen</option>
       </select>
+      <button class="btn sm touch-only" id="r-kbd-btn" title="Show the on-screen keyboard">Keyboard</button>
       <button class="btn sm" id="r-type">Type text…</button>
       <button class="btn sm" id="r-fit">Actual size</button>
       <button class="btn sm" id="r-fs">Fullscreen</button>
@@ -41,6 +42,7 @@
   </header>
   <div class="rstage" id="r-stage">
     <canvas id="r-canvas" tabindex="0"></canvas>
+    <input id="r-kbd" class="kbd-sink" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="On-screen keyboard input">
     <div class="roverlay" id="r-overlay">Starting remote session…</div>
   </div>
   <div class="rtype hidden" id="r-type-panel">

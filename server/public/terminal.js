@@ -39,9 +39,29 @@ function sendInput(data) {
 }
 const sendSize = () => send(`r ${term.rows} ${term.cols}`);
 
-term.onData((d) => sendInput(d));
+// extra-keys bar for phones: Esc, Tab, arrows, and a sticky Ctrl for the next key typed
+let ctrlArmed = false;
+const KEYS = { esc: '\x1b', tab: '\t', ctrlc: '\x03', up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D', pipe: '|', slash: '/', tilde: '~' };
+$('#t-keys').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-k]');
+  if (!b) return;
+  if (b.dataset.k === 'ctrl') { ctrlArmed = !ctrlArmed; b.classList.toggle('primary', ctrlArmed); }
+  else sendInput(KEYS[b.dataset.k]);
+  term.focus();
+});
+term.onData((d) => {
+  if (ctrlArmed && d.length === 1 && /[a-z@\[\\\]^_ ]/i.test(d)) {
+    ctrlArmed = false;
+    $('#t-ctrl').classList.remove('primary');
+    sendInput(String.fromCharCode(d.toUpperCase().charCodeAt(0) & 0x1f));
+    return;
+  }
+  sendInput(d);
+});
 term.onBinary((d) => sendInput(Uint8Array.from(d, (c) => c.charCodeAt(0))));
 window.addEventListener('resize', () => { fit.fit(); sendSize(); });
+// phones: the on-screen keyboard shrinks the visual viewport; refit so the prompt stays visible
+if (window.visualViewport) window.visualViewport.addEventListener('resize', () => { fit.fit(); sendSize(); });
 
 async function start() {
   if (!agentId) { setStatus('error', 'bad', 'No device specified.'); return; }
