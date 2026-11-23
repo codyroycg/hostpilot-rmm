@@ -1,6 +1,7 @@
 // Post-processing when a job finishes: scrub secrets, store parsed task results, wake waiting API calls.
 import { get, run, tx } from './db.js';
 import { notifyJobDone } from './jobs.js';
+import { ingestScan } from './netmap.js';
 
 function parseUpdates(agentId, stdout) {
   const updates = [];
@@ -27,12 +28,13 @@ function parseUpdates(agentId, stdout) {
 }
 
 export function onJobFinished(jobId) {
-  const j = get('SELECT id, agent_id, task, status, stdout, display_body FROM jobs WHERE id=?', jobId);
+  const j = get('SELECT id, agent_id, task, status, stdout, stderr, display_body FROM jobs WHERE id=?', jobId);
   if (!j) return;
   // job history keeps the readable copy (passwords masked) instead of the executed script
   if (j.display_body != null) run('UPDATE jobs SET body=display_body, display_body=NULL WHERE id=?', j.id);
   if (j.task === 'updates.scan' || j.task === 'updates.install') parseUpdates(j.agent_id, j.stdout);
   if (/^software\.(install|uninstall|reinstall)$/.test(j.task || '')) run('UPDATE agents SET want_inventory=1 WHERE id=?', j.agent_id);
   if (j.task === 'updates.install') run('UPDATE agents SET want_inventory=1 WHERE id=?', j.agent_id);
+  if (j.task === 'net.scan') { try { ingestScan(j); } catch (e) { console.error('[netscan]', e); } }
   notifyJobDone(j.id);
 }

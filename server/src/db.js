@@ -98,6 +98,16 @@ addColumn('agents', 'updates_checked_at', 'INTEGER');
 addColumn('agents', 'pending_updates', 'INTEGER');
 addColumn('agents', 'security_updates', 'INTEGER');
 addColumn('agents', 'reboot_required', 'INTEGER DEFAULT 0');
+db.exec(`
+CREATE TABLE IF NOT EXISTS networks(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+  probe_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL, subnet TEXT NOT NULL, community TEXT DEFAULT 'public',
+  scan_hours INTEGER DEFAULT 24, gateway TEXT, probe_ip TEXT, hops TEXT, last_scan_at INTEGER, last_job_id TEXT, scan_error TEXT, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS net_devices(
+  id INTEGER PRIMARY KEY, network_id INTEGER NOT NULL REFERENCES networks(id) ON DELETE CASCADE, dkey TEXT NOT NULL,
+  ip TEXT, mac TEXT, hostname TEXT, name TEXT, vendor TEXT, type TEXT, reason TEXT, type_manual INTEGER DEFAULT 0, ports TEXT, info TEXT,
+  agent_id TEXT, online INTEGER DEFAULT 1, first_seen INTEGER, last_seen INTEGER, UNIQUE(network_id, dkey));
+`);
 addColumn('users', 'dashboard', 'TEXT');         // JSON dashboard layout [{id, span}] (null = default)
 addColumn('agents', 'net_ifaces', 'TEXT');        // JSON list of network interfaces
 addColumn('agents', 'net_rx_total', 'INTEGER');   // last byte counters, to turn into rates

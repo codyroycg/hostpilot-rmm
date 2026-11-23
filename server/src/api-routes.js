@@ -6,6 +6,7 @@ import { AGENT_VERSIONS } from './agent-routes.js';
 import { createRemoteSession } from './remote.js';
 import { createTerminalSession } from './terminal.js';
 import { startLive, readLive } from './live.js';
+import { normalizeCidr, presentNetDevice, NET_TYPES } from './netmap.js';
 import { getTask, buildTask, baseName } from './task-catalog.js';
 import { createTransfer, getTransfer, receiveInto, sendFile, removeTransfer } from './transfers.js';
 
@@ -248,6 +249,8 @@ route('GET', '/api/dashboard', (ctx) => {
     },
     agents: { current: agents.length - outdated.length, outdated: outdated.length, offline: count(agents, (a) => !a.online) },
     servers, workstations,
+    net_devices: all('SELECT type, COUNT(*) AS n, SUM(online) AS online FROM net_devices GROUP BY type'),
+    networks: get('SELECT COUNT(*) AS n FROM networks').n,
     problem_devices: count(agents, (a) => worst.has(a.id) || !a.online),
     health: {
       long_uptime: longUp.sort((x, y) => x.boot_time - y.boot_time).slice(0, 6).map((a) => brief(a, { boot_time: a.boot_time })),
@@ -831,6 +834,128 @@ route('POST', '/api/agents/update-agent', (ctx) => {
   const agents = ids.map((id) => get('SELECT id, hostname, platform FROM agents WHERE id=?', id)).filter(Boolean);
   if (!agents.length) throw new HttpError(400, 'No devices selected');
   return queueAgentUpdate(u, agents);
+});
+
+// ---------- network discovery & topology ----------
+
+export function queueNetworkScan(n, createdBy) {
+  const a = get('SELECT id, hostname, platform FROM agents WHERE id=?', n.probe_agent_id);
+  if (!a) throw new HttpError(400, 'The probe device for this network no longer exists. Edit the network and pick another one.');
+  const r = queueJobs({
+    agents: [a], name: `Network discovery ${n.subnet}`, task: 'net.scan', timeout: 900, createdBy,
+    build: (ag) => buildTask('net.scan', ag.platform, { subnet: n.subnet, community: n.community || '' }, { allowInternal: true }),
+  });
+  if (!r.created) throw new HttpError(400, 'This device cannot run network discovery');
+  run('UPDATE networks SET last_job_id=?, scan_error=NULL WHERE id=?', r.jobs[0].id, n.id);
+  return r.jobs[0];
+}
+
+function networkSummary(n) {
+  const counts = all('SELECT type, COUNT(*) AS c, SUM(online) AS up FROM net_devices WHERE network_id=? GROUP BY type', n.id);
+  const job = n.last_job_id ? get('SELECT id, status, created_at, finished_at FROM jobs WHERE id=?', n.last_job_id) : null;
+  const probe = n.probe_agent_id ? get('SELECT id, hostname, platform, last_seen FROM agents WHERE id=?', n.probe_agent_id) : null;
+  return {
+    ...n, community_set: !!n.community, community: undefined, hops: n.hops ? JSON.parse(n.hops) : [],
+    probe, job, scanning: !!job && ['queued', 'running'].includes(job.status),
+    client_name: n.client_id ? get('SELECT name FROM clients WHERE id=?', n.client_id)?.name : null,
+    total: counts.reduce((s, c) => s + c.c, 0), online: counts.reduce((s, c) => s + (c.up || 0), 0),
+    by_type: Object.fromEntries(counts.map((c) => [c.type, c.c])),
+  };
+}
+
+function networkArgs(b, partial) {
+  const out = {};
+  if (!partial || b.name !== undefined) { out.name = String(b.name || '').trim().slice(0, 100); if (!out.name) throw new HttpError(400, 'Name is required'); }
+  if (!partial || b.subnet !== undefined) out.subnet = normalizeCidr(b.subnet);
+  if (!partial || b.probe_agent_id !== undefined) {
+    const a = get('SELECT id FROM agents WHERE id=?', String(b.probe_agent_id || ''));
+    if (!a) throw new HttpError(400, 'Pick a probe device');
+    out.probe_agent_id = a.id;
+  }
+  if (b.client_id !== undefined) out.client_id = b.client_id ? Number(b.client_id) : null;
+  if (b.community !== undefined) {
+    out.community = String(b.community || '').trim();
+    if (out.community && !/^[\w.@#$%^&*!+=-]{1,32}$/.test(out.community)) throw new HttpError(400, 'Invalid SNMP community');
+  }
+  if (b.scan_hours !== undefined) out.scan_hours = clampInt(b.scan_hours, 0, 24 * 30, 24);
+  return out;
+}
+
+route('GET', '/api/networks', (ctx) => { need(ctx); return all('SELECT * FROM networks ORDER BY name COLLATE NOCASE').map(networkSummary); });
+
+route('POST', '/api/networks', (ctx) => {
+  const u = need(ctx, 'tech');
+  const v = networkArgs(ctx.body, false);
+  const r = run(`INSERT INTO networks(name, client_id, probe_agent_id, subnet, community, scan_hours, created_at) VALUES(?,?,?,?,?,?,?)`,
+    v.name, v.client_id ?? null, v.probe_agent_id, v.subnet, v.community ?? 'public', v.scan_hours ?? 24, Date.now());
+  const n = get('SELECT * FROM networks WHERE id=?', r.lastInsertRowid);
+  audit(u.username, 'network.create', `${n.name} ${n.subnet}`);
+  if (ctx.body.scan_now !== false) queueNetworkScan(n, u.username);
+  return networkSummary(get('SELECT * FROM networks WHERE id=?', n.id));
+});
+
+const loadNetwork = (id) => { const n = get('SELECT * FROM networks WHERE id=?', Number(id)); if (!n) throw new HttpError(404, 'Network not found'); return n; };
+
+route('GET', '/api/networks/:id', (ctx) => {
+  need(ctx);
+  const n = loadNetwork(ctx.params.id);
+  return { ...networkSummary(n), devices: all('SELECT * FROM net_devices WHERE network_id=? ORDER BY online DESC, ip', n.id).map(presentNetDevice) };
+});
+
+route('PUT', '/api/networks/:id', (ctx) => {
+  const u = need(ctx, 'tech');
+  const n = loadNetwork(ctx.params.id);
+  const v = networkArgs(ctx.body, true);
+  const keys = Object.keys(v);
+  if (keys.length) run(`UPDATE networks SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`, ...keys.map((k) => v[k]), n.id);
+  if (v.subnet && v.subnet !== n.subnet) run('DELETE FROM net_devices WHERE network_id=?', n.id);
+  audit(u.username, 'network.update', n.name);
+  return networkSummary(loadNetwork(n.id));
+});
+
+route('DELETE', '/api/networks/:id', (ctx) => {
+  const u = need(ctx, 'tech');
+  const n = loadNetwork(ctx.params.id);
+  run('DELETE FROM networks WHERE id=?', n.id);
+  audit(u.username, 'network.delete', n.name);
+  return { ok: true };
+});
+
+route('POST', '/api/networks/:id/scan', (ctx) => {
+  const u = need(ctx, 'tech');
+  const n = loadNetwork(ctx.params.id);
+  const s = networkSummary(n);
+  if (s.scanning) throw new HttpError(409, 'A scan is already running');
+  const job = queueNetworkScan(n, u.username);
+  audit(u.username, 'network.scan', `${n.name} ${n.subnet}`);
+  return { job };
+});
+
+route('PUT', '/api/net-devices/:id', (ctx) => {
+  need(ctx, 'tech');
+  const d = get('SELECT * FROM net_devices WHERE id=?', Number(ctx.params.id));
+  if (!d) throw new HttpError(404, 'Device not found');
+  if (ctx.body.name !== undefined) run('UPDATE net_devices SET name=? WHERE id=?', String(ctx.body.name || '').trim().slice(0, 100) || null, d.id);
+  if (ctx.body.type !== undefined) {
+    if (ctx.body.type === 'auto') run('UPDATE net_devices SET type_manual=0 WHERE id=?', d.id);
+    else if (NET_TYPES.includes(ctx.body.type)) run("UPDATE net_devices SET type=?, type_manual=1, reason='Set manually' WHERE id=?", ctx.body.type, d.id);
+    else throw new HttpError(400, 'Unknown device type');
+  }
+  return presentNetDevice(get('SELECT * FROM net_devices WHERE id=?', d.id));
+});
+
+route('DELETE', '/api/net-devices/:id', (ctx) => {
+  need(ctx, 'tech');
+  run('DELETE FROM net_devices WHERE id=?', Number(ctx.params.id));
+  return { ok: true };
+});
+
+// subnets a device is on (from its IPs), to prefill "Add network"
+route('GET', '/api/agents/:id/subnets', (ctx) => {
+  need(ctx);
+  const a = loadAgent(ctx.params.id);
+  return (a.ip_addrs ? JSON.parse(a.ip_addrs) : []).filter((ip) => /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip))
+    .map((ip) => `${ip.split('.').slice(0, 3).join('.')}.0/24`).filter((v, i, arr) => arr.indexOf(v) === i);
 });
 
 // ---------- live performance (1-minute chart) ----------

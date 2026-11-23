@@ -264,6 +264,52 @@ a.wl-row:hover .wl-l { text-decoration: underline; }
 .wnet { display: flex; gap: 28px; padding: 14px 0 6px; justify-content: center; }
 .dash-section { margin: 22px 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
 
+/* network discovery */
+a.netcard { color: var(--text); display: flex; flex-direction: column; gap: 6px; }
+a.netcard:hover { text-decoration: none; border-color: var(--accent); }
+.netcard-n { margin-top: 4px; }
+.netcard-types { display: flex; flex-wrap: wrap; gap: 10px; }
+.netcard-types span { display: inline-flex; align-items: center; gap: 3px; }
+.netcard-types b { color: var(--text); font-size: 13px; }
+.ntype { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--c); font-weight: 600; white-space: nowrap; }
+.ntype svg { width: 16px; height: 16px; }
+.netsum { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.netsum a { display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel); color: var(--text); }
+.netsum a:hover, .netsum a.on { border-color: var(--accent); text-decoration: none; }
+.netsum a.on { background: var(--panel-2); }
+.topo-card { overflow-x: auto; }
+.topo { position: relative; min-width: 640px; padding: 4px 0 8px; }
+.topo-lines { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.topo-lines path { fill: none; stroke: var(--muted); stroke-width: 1.6; opacity: .55; }
+.ttier { position: relative; display: flex; justify-content: center; flex-wrap: wrap; gap: 18px 28px; margin-bottom: 34px; z-index: 1; }
+.ttier:last-child { margin-bottom: 0; }
+.tnode { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 128px; padding: 10px 8px; background: var(--panel); border: 2px solid var(--c); border-radius: 10px; text-align: center; cursor: default; }
+.tnode[data-nd] { cursor: pointer; }
+.tnode[data-nd]:hover { box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 25%, transparent); }
+.tnode.off { opacity: .5; border-style: dashed; }
+.tnode-ic { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff; background: var(--c); }
+.tnode-t { font-weight: 600; font-size: 13px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tnode-s { font-size: 11px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+.ttier.groups { align-items: flex-start; gap: 14px; }
+.tbus { position: relative; z-index: 1; height: 6px; background: var(--muted); opacity: .55; border-radius: 3px; margin: 0 4% 26px; }
+.tbus span { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); font-size: 11px; color: var(--text); white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
+.tgroup { width: 210px; background: var(--panel); border: 1px solid var(--border); border-top: 3px solid var(--c); border-radius: 8px; overflow: hidden; }
+.tgroup-h { display: flex; align-items: center; gap: 6px; padding: 7px 10px; font-size: 12.5px; font-weight: 600; color: var(--c); background: var(--panel-2); }
+.tgroup-h svg { width: 16px; height: 16px; }
+.tgroup-h b { margin-left: auto; color: var(--text); }
+.tgroup-b { max-height: 260px; overflow-y: auto; padding: 4px; }
+.tchip { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+.tchip:hover { background: var(--panel-2); }
+.tchip.off { opacity: .5; }
+.tchip .dot { margin: 0; flex: none; width: 7px; height: 7px; }
+.tchip-n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tchip-ip { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+@media (max-width: 700px) {
+  .topo { min-width: 0; }
+  .tnode { width: 108px; }
+  .tgroup { width: 100%; }
+}
+
 /* toggle switch */
 .switch { position: relative; display: inline-block; width: 36px; height: 20px; margin: 0; }
 .switch input { opacity: 0; width: 0; height: 0; }

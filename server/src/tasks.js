@@ -19,6 +19,18 @@ function autoUpdateScan() {
   });
 }
 
+// Rescan discovered networks on their schedule (scan_hours; 0 = manual only).
+async function networkScans() {
+  const { queueNetworkScan } = await import('./api-routes.js');
+  const t = Date.now();
+  for (const n of all('SELECT * FROM networks WHERE scan_hours > 0 AND probe_agent_id IS NOT NULL')) {
+    if (n.last_scan_at && t - n.last_scan_at < n.scan_hours * 3600000) continue;
+    const j = n.last_job_id ? all('SELECT status, created_at FROM jobs WHERE id=?', n.last_job_id)[0] : null;
+    if (j && (['queued', 'running'].includes(j.status) || t - j.created_at < 3600000)) continue; // running, or failed less than an hour ago
+    try { queueNetworkScan(n, 'scheduler'); } catch (e) { console.error('[netscan]', n.name, e.message); }
+  }
+}
+
 function targetsFor(s) {
   switch (s.target_type) {
     case 'all': return all('SELECT id, hostname, platform FROM agents');
@@ -89,6 +101,7 @@ export function startBackgroundTasks() {
   setInterval(safe('expire', expireJobs), 60_000);
   setInterval(safe('prune', prune), 3600_000);
   setInterval(safe('update-scan', autoUpdateScan), 5 * 60_000);
+  setInterval(() => networkScans().catch((e) => console.error('[task:netscan]', e)), 10 * 60_000);
   setTimeout(safe('update-scan', autoUpdateScan), 90_000);
   setTimeout(safe('prune', prune), 10_000);
 }

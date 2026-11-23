@@ -159,7 +159,7 @@ function chart(rows, series, { hours = 24, rate = false } = {}) {
 // ---------------- layout & routing ----------------
 const NAV = [
   ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/alerts', 'Alerts', 'alerts'],
-  null, ['#/patching', 'Patching'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'],
+  null, ['#/patching', 'Patching'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
   null, ['#/settings', 'Settings'],
 ];
 
@@ -204,6 +204,8 @@ const ROUTES = [
   [/^#\/jobs\/batch\/([\w-]+)$/, pageBatch, 'Job results'],
   [/^#\/alerts$/, pageAlerts, 'Alerts'],
   [/^#\/software$/, pageSoftware, 'Software'],
+  [/^#\/network$/, pageNetworks, 'Network'],
+  [/^#\/network\/(\d+)(?:\/(\w+))?$/, pageNetwork, 'Network'],
   [/^#\/settings$/, pageSettings, 'Settings'],
 ];
 
@@ -222,6 +224,8 @@ async function router() {
   if (!r) { view.innerHTML = '<div class="card">Page not found.</div>'; return; }
   $('#page-title').textContent = r[2];
   document.title = `${r[2]} · HostPilot RMM`;
+  state.pageAbort?.abort();
+  state.pageAbort = new AbortController();
   view.innerHTML = '<div class="muted">Loading…</div>';
   try { await r[1](view, ...hash.match(r[0]).slice(1)); }
   catch (e) { if (e.status !== 401) view.innerHTML = `<div class="card">Error: ${esc(e.message)}</div>`; }
@@ -361,6 +365,15 @@ const DASH_WIDGETS = [
   { id: 'fleet-trend', group: 'Charts', title: 'Fleet trend (24 h)', span: 2, render: (c) => widget('Fleet trend (24 h)', 'Devices reporting, average CPU and memory', c.trendRows.length > 1 ? chart(c.trendRows, [['devices', 'Devices reporting %', 'var(--ok)'], ['cpu', 'Avg CPU', 'var(--c1)'], ['mem', 'Avg memory', 'var(--c2)']], { hours: 24 }) : COLLECTING) },
   { id: 'network-trend', group: 'Charts', title: 'Network traffic (24 h)', span: 2, render: (c) => widget('Network traffic (24 h)', 'Whole fleet, download + upload', c.trendRows.filter((x) => x.net != null).length > 1 ? chart(c.trendRows, [['net', 'Download + upload', 'var(--c4)']], { hours: 24, rate: true }) : COLLECTING) },
 
+  { id: 'network-devices', group: 'Charts', title: 'Discovered network devices', span: 1, render: (c) => {
+    const rows = (c.d.net_devices || []).slice().sort((x, y) => y.n - x.n);
+    const parts = rows.slice(0, 6).map((r) => [r.n, (NET_TYPE_INFO[r.type] || NET_TYPE_INFO.unknown)[1], (NET_TYPE_INFO[r.type] || NET_TYPE_INFO.unknown)[0], '#/network']);
+    const rest = rows.slice(6).reduce((s, r) => s + r.n, 0);
+    if (rest) parts.push([rest, WC.gray, 'Other', '#/network']);
+    const total = rows.reduce((s, r) => s + r.n, 0);
+    return widget('Discovered network devices', `${plural(c.d.networks || 0, 'network')} scanned`, total ? `<div class="wsplit">${wDonut(parts, total)}${wLegend(parts)}</div>`
+      : '<div class="muted small">No networks scanned yet. <a href="#/network">Add a network →</a></div>', { href: '#/network' });
+  } },
   { id: 'list-alerts', group: 'Lists', title: 'Active alerts', span: 1, render: (c) => listCard('Active alerts', c.d.recent_alerts.map((a) => `<tr class="clickable" data-href="#/devices/${a.agent_id}/alerts"><td>${badge(a.severity, a.severity === 'critical' ? 'bad' : 'warn')}</td><td><strong>${esc(a.hostname)}</strong><div class="small muted">${esc(a.message)}</div></td><td class="right muted small nowrap">${fmtAgo(a.created_at)}</td></tr>`).join(''), 'No active alerts 🎉', '<a href="#/alerts" class="small">All alerts →</a>') },
   { id: 'list-clients', group: 'Lists', title: 'Clients list', span: 1, render: (c) => listCard('Clients', c.d.clients.slice(0, 8).map((x) => `<tr class="clickable" data-href="#/clients/${x.id}"><td><strong>${esc(x.name)}</strong><div class="small muted">${x.online}/${x.devices} online</div></td>
       <td class="right">${x.alerts ? badge(`${x.alerts} alert${x.alerts > 1 ? 's' : ''}`, 'bad') : ''} ${x.patches ? badge(`${x.patches} patches`, 'warn') : ''}${!x.alerts && !x.patches ? badge('healthy', 'ok') : ''}</td></tr>`).join(''), 'No clients yet', '<a href="#/clients" class="small">All clients →</a>') },
@@ -456,13 +469,13 @@ async function pageDashboard(view) {
     if (b.dataset.w === 'left' && i > 0) [layout[i - 1], layout[i]] = [layout[i], layout[i - 1]];
     if (b.dataset.w === 'right' && i < layout.length - 1) [layout[i + 1], layout[i]] = [layout[i], layout[i + 1]];
     if (b.dataset.w !== 'span') { save(); render(); }
-  }, true);
+  }, { capture: true, signal: state.pageAbort.signal });
   view.addEventListener('change', (e) => {
     const s = e.target.closest('[data-w="span"]');
     if (!s) return;
     const i = idx(s);
     if (i >= 0) { layout[i].span = Number(s.value); save(); render(); }
-  });
+  }, { capture: false, signal: state.pageAbort.signal });
   // drag and drop (mouse); phones use the ← → buttons
   view.addEventListener('dragstart', (e) => {
     const c = e.target.closest?.('.wcell');
@@ -471,7 +484,7 @@ async function pageDashboard(view) {
     c.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', dragId);
-  });
+  }, { capture: false, signal: state.pageAbort.signal });
   view.addEventListener('dragover', (e) => {
     if (!dragId) return;
     const c = e.target.closest('.wcell');
@@ -481,7 +494,7 @@ async function pageDashboard(view) {
     const after = e.clientX > r.left + r.width / 2;
     view.querySelectorAll('.drop-before,.drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after'));
     c.classList.add(after ? 'drop-after' : 'drop-before');
-  });
+  }, { capture: false, signal: state.pageAbort.signal });
   view.addEventListener('drop', (e) => {
     if (!dragId) return;
     e.preventDefault();
@@ -496,8 +509,8 @@ async function pageDashboard(view) {
     }
     dragId = null;
     render();
-  });
-  view.addEventListener('dragend', () => { if (dragId) { dragId = null; render(); } });
+  }, { capture: false, signal: state.pageAbort.signal });
+  view.addEventListener('dragend', () => { if (dragId) { dragId = null; render(); } }, { signal: state.pageAbort.signal });
 
   const load = async () => {
     if (editing && data) return; // don't redraw under the user's hands
@@ -506,6 +519,228 @@ async function pageDashboard(view) {
   };
   await load();
   every(15000, load);
+}
+
+// ---------------- network discovery & topology ----------------
+const NET_TYPE_INFO = {
+  router: ['Router', WC.blue], firewall: ['Firewall', WC.red], switch: ['Switch', WC.teal], access_point: ['Access point', WC.purple],
+  server: ['Server', '#2563eb'], workstation: ['Workstation', WC.pink], printer: ['Printer', WC.orange], camera: ['Camera', '#0ea5e9'],
+  nas: ['NAS / storage', WC.olive], voip: ['VoIP phone', '#14b8a6'], phone: ['Phone / tablet', '#a855f7'], media: ['Media / TV', '#f43f5e'],
+  iot: ['IoT / smart home', WC.amber], unknown: ['Unknown', WC.gray],
+};
+const NET_ORDER = Object.keys(NET_TYPE_INFO);
+const ic = (d) => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const NET_ICONS = {
+  internet: ic('<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4 4 0 0 1 0 9.5z"/>'),
+  router: ic('<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 16.5h.01M11 16.5h.01M8 13l-2-6M16 13l2-6"/>'),
+  firewall: ic('<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9.3h18M3 14.6h18M9 4v5.3M15 9.3v5.3M9 14.6V20"/>'),
+  switch: ic('<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h1M9 11h1M12 11h1M15 11h1M18 11h0M6 14h12"/>'),
+  access_point: ic('<path d="M5 12.5a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="18.5" r="1"/><path d="M2 9.3a14.5 14.5 0 0 1 20 0"/>'),
+  server: ic('<rect x="4" y="3" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/><path d="M8 6.5h.01M8 17.5h.01"/>'),
+  workstation: ic('<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/>'),
+  printer: ic('<path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M6 14h12v7H6z"/>'),
+  camera: ic('<path d="M3 8h13l5-3v14l-5-3H3z"/><circle cx="9.5" cy="12" r="2.5"/>'),
+  nas: ic('<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M9 6h6M9 10h6M12 17h.01"/>'),
+  voip: ic('<path d="M5 3h4l2 5-3 2a11 11 0 0 0 6 6l2-3 5 2v4a2 2 0 0 1-2 2A17 17 0 0 1 3 5a2 2 0 0 1 2-2"/>'),
+  phone: ic('<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>'),
+  media: ic('<rect x="2" y="5" width="20" height="13" rx="2"/><path d="M8 21h8"/><path d="m10 9 5 2.5-5 2.5z"/>'),
+  iot: ic('<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3"/>'),
+  unknown: ic('<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .9-1 1.7M12 17h.01"/>'),
+};
+const netName = (d) => d.name || d.hostname || d.ip;
+const PORT_NAMES = { 21: 'FTP', 22: 'SSH', 23: 'Telnet', 53: 'DNS', 80: 'HTTP', 135: 'RPC', 139: 'NetBIOS', 443: 'HTTPS', 445: 'SMB', 515: 'LPD', 548: 'AFP', 554: 'RTSP', 631: 'IPP',
+  1883: 'MQTT', 3389: 'RDP', 5000: 'UPnP/NAS', 5001: 'NAS (HTTPS)', 5060: 'SIP', 5900: 'VNC', 6668: 'Tuya', 7547: 'TR-069', 8000: 'HTTP alt', 8008: 'Cast', 8009: 'Cast',
+  8080: 'HTTP alt', 8443: 'HTTPS alt', 8883: 'MQTT (TLS)', 9100: 'Printing', 37777: 'Dahua', 62078: 'iOS sync' };
+const netTypeBadge = (t) => { const [l, c] = NET_TYPE_INFO[t] || NET_TYPE_INFO.unknown; return `<span class="ntype" style="--c:${c}">${NET_ICONS[t] || NET_ICONS.unknown}${l}</span>`; };
+
+async function pageNetworks(view) {
+  const draw = async () => {
+    const nets = await api('GET', '/api/networks');
+    view.innerHTML = `<div class="page-head"><h1>Network discovery</h1>${can('tech') ? '<button class="btn primary" id="net-add">+ Add network</button>' : ''}</div>
+      <p class="muted small" style="margin-top:-8px">A HostPilot device on each network acts as the probe: it scans the subnet, identifies what it finds (routers, firewalls, switches, access points, computers, printers, cameras, IoT…) and maps the topology.</p>
+      ${nets.length ? `<div class="grid cols-3">${nets.map((n) => `<a class="card netcard" href="#/network/${n.id}">
+        <div class="row" style="justify-content:space-between"><strong>${esc(n.name)}</strong>${n.scanning ? badge('scanning…', 'info') : n.scan_error ? badge('scan failed', 'bad') : ''}</div>
+        <div class="small muted">${esc(n.subnet)}${n.client_name ? ` · ${esc(n.client_name)}` : ''} · probe: ${esc(n.probe?.hostname || 'none')}</div>
+        <div class="netcard-n"><span class="big">${n.total}</span> devices <span class="small muted">(${n.online} online)</span></div>
+        <div class="netcard-types">${NET_ORDER.filter((t) => n.by_type[t]).map((t) => `<span title="${NET_TYPE_INFO[t][0]}" style="color:${NET_TYPE_INFO[t][1]}">${NET_ICONS[t]}<b>${n.by_type[t]}</b></span>`).join('') || '<span class="small muted">Not scanned yet</span>'}</div>
+        <div class="small muted">${n.last_scan_at ? `Scanned ${fmtAgo(n.last_scan_at)}` : 'Never scanned'}${n.scan_hours ? ` · rescans every ${n.scan_hours} h` : ' · manual scans'}</div></a>`).join('')}</div>`
+      : `<div class="card"><h2>No networks yet</h2><p>Click <strong>Add network</strong>, pick a device with the HostPilot agent on that network, and confirm its subnet (for example 192.168.1.0/24). The first scan takes about a minute.</p></div>`}`;
+    $('#net-add')?.addEventListener('click', () => networkModal(null));
+  };
+  await draw();
+  every(15000, draw);
+}
+
+async function networkModal(n) {
+  const [agents, clients] = await Promise.all([api('GET', '/api/agents'), api('GET', '/api/clients')]);
+  agents.sort((x, y) => (y.online - x.online) || x.hostname.localeCompare(y.hostname));
+  const m = openModal(n ? `Edit ${n.name}` : 'Add network', `<form id="nw-form">
+    <div class="field"><label>Name</label><input type="text" name="name" required maxlength="100" value="${esc(n?.name || '')}" placeholder="e.g. Head office LAN"></div>
+    <div class="field"><label>Probe device (runs the scan)</label><select name="probe_agent_id" required>${agents.map((a) => `<option value="${a.id}" ${a.id === n?.probe_agent_id ? 'selected' : ''}>${esc(a.hostname)}${a.client_name ? ` (${esc(a.client_name)})` : ''}${a.online ? '' : ' (offline)'}</option>`).join('')}</select></div>
+    <div class="field"><label>Subnet</label><input type="text" name="subnet" required value="${esc(n?.subnet || '')}" placeholder="192.168.1.0/24"><div class="small muted" id="nw-sugg"></div></div>
+    <div class="form-grid">
+      <div class="field"><label>Client (optional)</label><select name="client_id"><option value="">—</option>${clients.map((c) => `<option value="${c.id}" ${c.id === n?.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Rescan</label><select name="scan_hours">${[[0, 'Manually only'], [6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Daily'], [168, 'Weekly']].map(([v, l]) => `<option value="${v}" ${(n?.scan_hours ?? 24) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    </div>
+    <div class="field"><label>SNMP community (optional)</label><input type="text" name="community" value="${n ? '' : 'public'}" placeholder="${n?.community_set ? 'unchanged (leave blank to keep)' : 'public'}" autocomplete="off">
+      <div class="small muted">Read-only SNMP lets switches, routers and firewalls report their model. Leave as "public" if you haven't changed it.</div></div>
+    ${n ? '' : '<label class="check"><input type="checkbox" name="scan_now" checked> Scan now</label>'}
+    <p class="small muted">Only private address ranges can be scanned (up to a /20). Some security tools flag network scans; let your client know.</p></form>`,
+  { foot: `<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="nw-form">${n ? 'Save' : 'Add and scan'}</button>` });
+  const f = $('#nw-form', m);
+  const suggest = async () => {
+    const id = f.elements.probe_agent_id.value;
+    if (!id) return;
+    const subs = await api('GET', `/api/agents/${id}/subnets`).catch(() => []);
+    $('#nw-sugg', m).innerHTML = subs.length ? `This device is on: ${subs.map((s) => `<a href="#" data-sub="${s}">${s}</a>`).join(', ')}` : '';
+    if (!f.elements.subnet.value && subs[0]) f.elements.subnet.value = subs[0];
+  };
+  f.elements.probe_agent_id.addEventListener('change', suggest);
+  $('#nw-sugg', m).addEventListener('click', (e) => { const a = e.target.closest('[data-sub]'); if (a) { e.preventDefault(); f.elements.subnet.value = a.dataset.sub; } });
+  suggest();
+  f.addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(f));
+    v.scan_now = !!f.elements.scan_now?.checked;
+    if (n && !v.community) delete v.community;
+    const r = n ? await api('PUT', `/api/networks/${n.id}`, v) : await api('POST', '/api/networks', v);
+    closeModal();
+    toast(n ? 'Network saved' : 'Network added. The first scan takes about a minute.');
+    if (location.hash === `#/network/${r.id}`) router(); else location.hash = `#/network/${r.id}`;
+  }));
+}
+
+async function pageNetwork(view, id, tab = 'map') {
+  let n = null, filter = '', q = '';
+  const draw = async () => {
+    n = await api('GET', `/api/networks/${id}`);
+    const ds = n.devices;
+    const head = `<div class="page-head"><div><h1>${esc(n.name)}</h1>
+        <div class="small muted" style="margin-top:4px">${esc(n.subnet)} · gateway ${esc(n.gateway || '?')} · probe ${n.probe ? `<a href="#/devices/${n.probe.id}">${esc(n.probe.hostname)}</a>` : 'none'}
+        · ${n.scanning ? badge('scanning…', 'info') : n.last_scan_at ? `scanned ${fmtAgo(n.last_scan_at)}` : 'never scanned'}</div></div>
+      <div class="row">${can('tech') ? `<button class="btn primary" id="nw-scan" ${n.scanning ? 'disabled' : ''}>${n.scanning ? 'Scanning…' : 'Scan now'}</button>
+        <button class="btn" id="nw-edit">Edit</button><button class="btn danger" id="nw-del">Delete</button>` : ''}</div></div>
+      ${n.scan_error ? `<div class="card" style="border-color:var(--bad);margin-bottom:12px"><strong>Last scan failed:</strong> <span class="small">${esc(cleanErr(n.scan_error))}</span></div>` : ''}
+      <div class="netsum">${NET_ORDER.filter((t) => n.by_type[t]).map((t) => `<a href="#" data-ftype="${t}" class="${filter === t ? 'on' : ''}">${netTypeBadge(t)}<b>${n.by_type[t]}</b></a>`).join('')}</div>
+      <nav class="tabs"><a href="#/network/${id}/map" class="${tab === 'map' ? 'active' : ''}">Topology map</a><a href="#/network/${id}/devices" class="${tab === 'devices' ? 'active' : ''}">Devices (${ds.length})</a></nav>`;
+    if (!ds.length) {
+      view.innerHTML = `${head}<div class="card muted">${n.scanning ? 'Scanning the network… devices appear here in about a minute.' : 'No devices yet. Click Scan now.'}</div>`;
+    } else if (tab === 'devices') {
+      const list = ds.filter((d) => (!filter || d.type === filter) && (!q || [netName(d), d.ip, d.mac, d.vendor, d.hostname].join(' ').toLowerCase().includes(q)));
+      view.innerHTML = `${head}<div class="toolbar"><input type="search" id="nd-q" placeholder="Search name, IP, MAC, vendor…" value="${esc(q)}">
+          <select id="nd-type"><option value="">All types</option>${NET_ORDER.filter((t) => n.by_type[t]).map((t) => `<option value="${t}" ${filter === t ? 'selected' : ''}>${NET_TYPE_INFO[t][0]}</option>`).join('')}</select></div>
+        <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Status</th><th>Device</th><th>Type</th><th>IP</th><th>MAC / vendor</th><th>Open ports</th><th>Last seen</th></tr></thead><tbody>
+        ${list.map((d) => `<tr class="clickable" data-nd="${d.id}"><td>${d.online ? badge('online', 'ok') : badge('offline')}</td>
+          <td><strong>${esc(netName(d))}</strong>${d.agent_id ? ` ${badge('HostPilot', 'info')}` : ''}${d.info.self ? ` ${badge('probe', 'info')}` : ''}</td>
+          <td>${netTypeBadge(d.type)}</td><td class="mono small">${esc(d.ip)}</td>
+          <td class="small"><span class="mono">${esc(d.mac || '—')}</span><div class="muted">${esc(d.vendor || '')}</div></td>
+          <td class="small">${esc((d.ports || '').split(',').filter(Boolean).map((p) => PORT_NAMES[p] ? `${p} ${PORT_NAMES[p]}` : p).join(', '))}</td>
+          <td class="small nowrap">${d.online ? 'now' : fmtAgo(d.last_seen)}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">No matching devices</td></tr>'}
+        </tbody></table></div></div>`;
+      $('#nd-q').addEventListener('input', (e) => { q = e.target.value.toLowerCase(); const pos = e.target.selectionStart; draw().then(() => { const i = $('#nd-q'); i.focus(); i.setSelectionRange(pos, pos); }); });
+      $('#nd-type').addEventListener('change', (e) => { filter = e.target.value; draw(); });
+    } else {
+      view.innerHTML = `${head}<div class="card topo-card"><div class="topo" id="topo">${topoHtml(n, filter)}</div>
+        <p class="small muted" style="margin:10px 0 0">Links between devices are inferred from device types (the scan sees which devices exist, not which switch port each one uses). Faded devices weren't found in the last scan. Click a device for details.</p></div>`;
+      requestAnimationFrame(() => drawTopoLines($('#topo')));
+    }
+    view.querySelectorAll('[data-ftype]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); filter = filter === a.dataset.ftype ? '' : a.dataset.ftype; draw(); }));
+    $('#nw-scan')?.addEventListener('click', guard(async () => { await api('POST', `/api/networks/${id}/scan`); toast('Scan started. It usually takes about a minute.'); draw(); }));
+    $('#nw-edit')?.addEventListener('click', guard(() => networkModal(n)));
+    $('#nw-del')?.addEventListener('click', guard(async () => {
+      if (!await confirmDialog(`Delete the network "${n.name}" and its ${n.total} discovered devices? Nothing is changed on the devices themselves.`, { okLabel: 'Delete', danger: true })) return;
+      await api('DELETE', `/api/networks/${id}`); location.hash = '#/network';
+    }));
+  };
+  view.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-nd]');
+    if (el && n) { e.preventDefault(); e.stopPropagation(); netDeviceModal(n.devices.find((d) => String(d.id) === el.dataset.nd), draw); }
+  }, { capture: true, signal: state.pageAbort.signal });
+  window.addEventListener('resize', () => { const t = $('#topo'); if (t) drawTopoLines(t); }, { signal: state.pageAbort.signal });
+  await draw();
+  every(15000, () => (n?.scanning ? draw() : null));
+}
+
+// Topology: internet -> ISP -> gateway -> infrastructure (switches, APs, firewalls, other routers) -> grouped endpoints.
+function topoHtml(n, filter) {
+  const ds = n.devices.filter((d) => !filter || d.type === filter || ['router', 'firewall', 'switch', 'access_point'].includes(d.type));
+  const node = (id, type, title, sub, extra = '', offline = false, nd = null) => `<div class="tnode${offline ? ' off' : ''}" data-tid="${id}"${nd ? ` data-nd="${nd}"` : ''} style="--c:${(NET_TYPE_INFO[type] || ['', WC.blue])[1]}">
+    <div class="tnode-ic">${NET_ICONS[type] || NET_ICONS.unknown}</div><div class="tnode-t">${esc(title)}</div><div class="tnode-s">${esc(sub)}</div>${extra}</div>`;
+  const gw = ds.find((d) => d.ip === n.gateway);
+  const publicHop = (n.hops || []).find((h) => !/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(h.ip));
+  const infra = ds.filter((d) => d !== gw && ['firewall', 'router', 'switch', 'access_point'].includes(d.type))
+    .sort((x, y) => ['firewall', 'router', 'switch', 'access_point'].indexOf(x.type) - ['firewall', 'router', 'switch', 'access_point'].indexOf(y.type));
+  const ends = ds.filter((d) => d !== gw && !infra.includes(d));
+  const groups = NET_ORDER.filter((t) => !['router', 'firewall', 'switch', 'access_point'].includes(t)).map((t) => [t, ends.filter((d) => d.type === t)]).filter(([, l]) => l.length);
+  const sw = infra.find((d) => d.type === 'switch');
+  const gwId = gw ? `d${gw.id}` : 'gw';
+  const edges = [['internet', publicHop ? 'isp' : gwId]];
+  if (publicHop) edges.push(['isp', gwId]);
+  for (const d of infra) edges.push([d.type === 'access_point' && sw ? `d${sw.id}` : gwId, `d${d.id}`]);
+  // every endpoint group hangs off one LAN bar under the main switch (or the gateway when there is no switch)
+  if (groups.length) edges.push([sw ? `d${sw.id}` : gwId, 'bus']);
+  // a node's title: its name, or its type when all we know is the IP (the IP is shown underneath anyway)
+  const title = (d) => (d.name || d.hostname || (NET_TYPE_INFO[d.type] || NET_TYPE_INFO.unknown)[0]);
+  const chipName = (d) => d.name || d.hostname || (d.vendor && !/^Private/.test(d.vendor) ? d.vendor : d.ip);
+  const chip = (d) => `<div class="tchip${d.online ? '' : ' off'}" data-nd="${d.id}" title="${esc(`${netName(d)} · ${d.ip}${d.vendor ? ` · ${d.vendor}` : ''}`)}"><span class="dot ${d.online ? 'on' : 'off'}"></span><span class="tchip-n">${esc(chipName(d))}</span><span class="tchip-ip">.${esc(d.ip.split('.').pop())}</span></div>`;
+  return `<svg class="topo-lines" data-edges='${JSON.stringify(edges)}'></svg>
+    <div class="ttier">${node('internet', 'internet', 'Internet', n.probe ? 'via public IP' : '')}</div>
+    ${publicHop ? `<div class="ttier">${node('isp', 'router', 'ISP', publicHop.ip)}</div>` : ''}
+    <div class="ttier">${gw ? node(gwId, gw.type, title(gw), `${gw.ip} · gateway`, '', !gw.online, gw.id) : node('gw', 'router', 'Gateway', n.gateway || 'unknown')}</div>
+    ${infra.length ? `<div class="ttier">${infra.map((d) => node(`d${d.id}`, d.type, title(d), d.ip, '', !d.online, d.id)).join('')}</div>` : ''}
+    ${groups.length ? `<div class="tbus" data-tid="bus"><span>LAN · ${esc(n.subnet)}</span></div>` : ''}
+    <div class="ttier groups">${groups.map(([t, list]) => `<div class="tgroup" data-tid="g${t}" style="--c:${NET_TYPE_INFO[t][1]}">
+      <div class="tgroup-h">${NET_ICONS[t]}${NET_TYPE_INFO[t][0]} <b>${list.length}</b></div>
+      <div class="tgroup-b">${list.sort((x, y) => (y.online - x.online) || netName(x).localeCompare(netName(y))).map(chip).join('')}</div></div>`).join('')}</div>`;
+}
+
+function drawTopoLines(root) {
+  const svg = root.querySelector('.topo-lines');
+  if (!svg) return;
+  const box = root.getBoundingClientRect();
+  svg.setAttribute('width', box.width); svg.setAttribute('height', root.scrollHeight);
+  const pos = (id) => { const el = root.querySelector(`[data-tid="${id}"]`); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left - box.left + r.width / 2, top: r.top - box.top, bottom: r.bottom - box.top }; };
+  svg.innerHTML = JSON.parse(svg.dataset.edges).map(([a, b]) => {
+    const p = pos(a), q = pos(b);
+    if (!p || !q) return '';
+    const my = (p.bottom + q.top) / 2;
+    return `<path d="M${p.x},${p.bottom} C${p.x},${my} ${q.x},${my} ${q.x},${q.top}"/>`;
+  }).join('');
+}
+
+function netDeviceModal(d, onSaved) {
+  if (!d) return;
+  const kv = (k, v) => (v ? `<dt>${k}</dt><dd>${v}</dd>` : '');
+  const i = d.info || {};
+  const ports = (d.ports || '').split(',').filter(Boolean);
+  const web = ports.includes('443') ? `https://${d.ip}` : ports.includes('80') ? `http://${d.ip}` : ports.includes('8443') ? `https://${d.ip}:8443` : ports.includes('8080') ? `http://${d.ip}:8080` : '';
+  const m = openModal(netName(d), `<dl class="kv">
+      ${kv('Type', `${netTypeBadge(d.type)} <span class="small muted">${esc(d.reason || '')}</span>`)}
+      ${kv('Status', d.online ? badge('online', 'ok') : `${badge('offline')} <span class="small muted">last seen ${fmtAgo(d.last_seen)}</span>`)}
+      ${kv('IP address', `<span class="mono">${esc(d.ip)}</span>${web ? ` · <a href="${esc(web)}" target="_blank" rel="noopener noreferrer">open web interface ↗</a>` : ''}`)}
+      ${kv('MAC address', `<span class="mono">${esc(d.mac)}</span>`)}${kv('Vendor', esc(d.vendor))}
+      ${kv('Hostname', esc(d.hostname))}${kv('NetBIOS name', esc(i.netbios))}
+      ${kv('Open ports', ports.map((p) => `${p}${PORT_NAMES[p] ? ` <span class="muted">${PORT_NAMES[p]}</span>` : ''}`).join(', '))}
+      ${kv('SNMP', esc([i.snmp_name, i.snmp_descr].filter(Boolean).join(' — ')))}
+      ${kv('Web server', esc([i.http_server, i.http_title && `“${i.http_title}”`].filter(Boolean).join(' ')))}
+      ${kv('UPnP', esc([i.ssdp_name, i.ssdp_mfr, i.ssdp_model, i.ssdp_type && i.ssdp_type.replace(/^urn:schemas-upnp-org:device:/, '')].filter(Boolean).join(' · ')))}
+      ${kv('Managed', d.agent_id ? `<a href="#/devices/${d.agent_id}">Open in HostPilot →</a>` : '')}
+      ${kv('First seen', fmtDate(d.first_seen))}</dl>
+    ${can('tech') ? `<form id="nd-form" style="margin-top:14px"><div class="form-grid">
+      <div class="field"><label>Name</label><input type="text" name="name" maxlength="100" value="${esc(d.name || '')}" placeholder="${esc(d.hostname || d.ip)}"></div>
+      <div class="field"><label>Type</label><select name="type"><option value="auto">Automatic (${esc((NET_TYPE_INFO[d.type] || [''])[0])})</option>
+        ${NET_ORDER.map((t) => `<option value="${t}" ${d.type_manual && d.type === t ? 'selected' : ''}>${NET_TYPE_INFO[t][0]}</option>`).join('')}</select></div></div></form>` : ''}`,
+  { wide: true, foot: can('tech') ? '<button class="btn danger" id="nd-forget">Forget device</button><span class="grow"></span><button class="btn" data-action="close-modal">Close</button><button class="btn primary" form="nd-form">Save</button>' : '<button class="btn" data-action="close-modal">Close</button>' });
+  $('#nd-form', m)?.addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(e.target));
+    await api('PUT', `/api/net-devices/${d.id}`, v);
+    closeModal(); toast('Saved'); onSaved();
+  }));
+  $('#nd-forget', m)?.addEventListener('click', guard(async () => {
+    await api('DELETE', `/api/net-devices/${d.id}`);
+    closeModal(); toast('Device removed (it reappears if found again)'); onSaved();
+  }));
 }
 
 // ---------------- devices ----------------

@@ -173,6 +173,14 @@ export const TASKS = {
   },
   'fw.delete': { title: (a) => `Delete firewall rule ${a.id}`, timeout: 120, wait: 60, args: (a) => ({ id: fwId(a) }) },
 
+  'net.scan': {
+    internal: true, title: (a) => `Network discovery ${a.subnet}`, timeout: 900,
+    args: (a) => {
+      const community = S(a.community, 64);
+      if (community && !/^[\w.@#$%^&*!+=-]{1,32}$/.test(community)) throw new HttpError(400, 'Invalid SNMP community');
+      return { subnet: need(S(a.subnet, 20), 'Subnet'), community };
+    },
+  },
   'metrics.live': { internal: true, title: () => 'Live performance monitor', timeout: 3600, args: (a) => ({ url: S(a.url) }) },
   'terminal.open': { internal: true, title: () => 'Terminal session', timeout: 12 * 3600, args: (a) => ({ in: S(a.in), out: S(a.out), close: S(a.close) }) },
 };
