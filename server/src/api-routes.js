@@ -121,27 +121,135 @@ function loadAgent(id) {
 // ---------- dashboard ----------
 
 route('GET', '/api/dashboard', (ctx) => {
-  need(ctx);
+  const u = need(ctx);
+  const now = Date.now();
+  const since = now - 86400000;
+  const s = getSettings();
   const agents = all(AGENT_SELECT).map(presentAgent);
-  const since = Date.now() - 86400000;
+  const online = agents.filter((a) => a.online);
+  // the small device summary the dashboard lists use
+  const brief = (a, extra = {}) => ({ id: a.id, hostname: a.hostname, platform: a.platform, online: a.online, maintenance: a.maintenance,
+    client_name: a.client_name, last_seen: a.last_seen, ...extra });
+  const top = (list, key, n = 5) => list.filter((a) => a[key] != null).sort((x, y) => y[key] - x[key]).slice(0, n);
+  const count = (list, fn) => list.filter(fn).length;
+  const avg = (list, key) => { const v = list.map((a) => a[key]).filter((x) => x != null); return v.length ? v.reduce((p, c) => p + c, 0) / v.length : null; };
+
   const jobStats = all('SELECT status, COUNT(*) AS n FROM jobs WHERE created_at>? GROUP BY status', since);
+  const alertRows = all(`SELECT al.*, a.hostname FROM alerts al JOIN agents a ON a.id=al.agent_id
+                         WHERE al.status IN ('open','ack') ORDER BY (al.severity='critical') DESC, al.updated_at DESC`);
+
+  // latest network rate per device (from the last check-in within 10 minutes)
+  const net = all(`SELECT m.agent_id, m.net_rx, m.net_tx FROM metrics m
+                   JOIN (SELECT agent_id, MAX(ts) AS ts FROM metrics WHERE ts>? AND net_rx IS NOT NULL GROUP BY agent_id) x
+                     ON x.agent_id=m.agent_id AND x.ts=m.ts`, now - 600000);
+  const netById = new Map(net.map((r) => [r.agent_id, r]));
+  const withNet = agents.filter((a) => netById.has(a.id)).map((a) => ({ ...a, net_total: netById.get(a.id).net_rx + netById.get(a.id).net_tx,
+    net_rx: netById.get(a.id).net_rx, net_tx: netById.get(a.id).net_tx }));
+
+  // fleet trend: per hour over 24 h, devices reporting + average CPU / memory
+  const trend = all(`SELECT (ts/3600000)*3600000 AS ts, COUNT(DISTINCT agent_id) AS devices, AVG(cpu) AS cpu, AVG(mem) AS mem,
+                     AVG(net_rx+net_tx) * COUNT(DISTINCT CASE WHEN net_rx IS NOT NULL THEN agent_id END) AS net
+                     FROM metrics WHERE ts>? GROUP BY ts/3600000 ORDER BY 1`, since);
+
+  // patching
+  const scanned = agents.filter((a) => a.updates_checked_at);
+  const staleScan = now - Math.max(1, s.update_scan_hours || 24) * 3 * 3600000;
+
+  // clients
+  const clients = all('SELECT id, name FROM clients ORDER BY name COLLATE NOCASE').map((c) => {
+    const list = agents.filter((a) => a.client_id === c.id);
+    return { id: c.id, name: c.name, devices: list.length, online: count(list, (a) => a.online), alerts: list.reduce((p, a) => p + (a.open_alerts || 0), 0),
+      patches: list.reduce((p, a) => p + (a.pending_updates || 0), 0) };
+  });
+  const unassigned = agents.filter((a) => !a.client_id).length;
+
+  // operating systems
+  const osCounts = new Map();
+  for (const a of agents) { const k = a.os_name || (a.platform === 'windows' ? 'Windows' : 'Linux'); osCounts.set(k, (osCounts.get(k) || 0) + 1); }
+
+  // servers vs workstations (Windows Server editions and Linux hosts count as servers)
+  const worst = new Map(all(`SELECT agent_id, MAX(CASE WHEN severity='critical' THEN 2 ELSE 1 END) AS lvl FROM alerts
+                              WHERE status IN ('open','ack') GROUP BY agent_id`).map((x) => [x.agent_id, x.lvl]));
+  const isServer = (a) => a.platform === 'linux' || /server/i.test(a.os_name || '');
+  const group = (list) => {
+    const failing = count(list, (a) => worst.get(a.id) === 2);
+    const warning = count(list, (a) => worst.get(a.id) === 1);
+    const days = (a) => (a.boot_time ? (now - a.boot_time) / 86400000 : 0);
+    return {
+      total: list.length,
+      problems: { failing, warning, healthy: list.length - failing - warning },
+      status: {
+        offline: count(list, (a) => !a.online), reboot: count(list, (a) => a.reboot_required),
+        patches: count(list, (a) => a.pending_updates > 0), online: count(list, (a) => a.online),
+      },
+      uptime: { d30: count(list, (a) => a.online && days(a) > 30), d60: count(list, (a) => a.online && days(a) > 60), d90: count(list, (a) => a.online && days(a) > 90) },
+    };
+  };
+  const servers = group(agents.filter(isServer));
+  const workstations = group(agents.filter((a) => !isServer(a)));
+
+  const outdated = agents.filter((a) => a.update_pending);
+  const longUp = online.filter((a) => a.boot_time && now - a.boot_time > 30 * 86400000);
+  const longOff = agents.filter((a) => !a.online && a.last_seen && now - a.last_seen > 7 * 86400000);
+
   return {
+    generated_at: now,
     totals: {
-      devices: agents.length,
-      online: agents.filter((a) => a.online).length,
-      offline: agents.filter((a) => !a.online).length,
-      windows: agents.filter((a) => a.platform === 'windows').length,
-      linux: agents.filter((a) => a.platform === 'linux').length,
-      clients: get('SELECT COUNT(*) AS n FROM clients').n,
-      open_alerts: get("SELECT COUNT(*) AS n FROM alerts WHERE status IN ('open','ack')").n,
+      devices: agents.length, online: online.length, offline: agents.length - online.length,
+      maintenance: count(agents, (a) => a.maintenance), with_alerts: count(agents, (a) => a.open_alerts > 0),
+      windows: count(agents, (a) => a.platform === 'windows'), linux: count(agents, (a) => a.platform === 'linux'),
+      clients: clients.length, unassigned,
+      open_alerts: alertRows.length, critical_alerts: count(alertRows, (a) => a.severity === 'critical'),
+      users: get('SELECT COUNT(*) AS n FROM users').n, scripts: get('SELECT COUNT(*) AS n FROM scripts').n,
+      software_titles: get('SELECT COUNT(DISTINCT name) AS n FROM software').n,
     },
+    resources: {
+      avg_cpu: avg(online, 'cpu_pct'), avg_mem: avg(online, 'mem_pct'), avg_disk: avg(agents, 'disk_pct'),
+      high_cpu: count(online, (a) => a.cpu_pct >= s.cpu_threshold), high_mem: count(online, (a) => a.mem_pct >= s.mem_threshold),
+      low_disk: count(agents, (a) => a.disk_pct >= s.disk_threshold),
+      thresholds: { cpu: s.cpu_threshold, mem: s.mem_threshold, disk: s.disk_threshold },
+      top_cpu: top(online, 'cpu_pct').map((a) => brief(a, { value: a.cpu_pct })),
+      top_mem: top(online, 'mem_pct').map((a) => brief(a, { value: a.mem_pct })),
+      top_disk: top(agents, 'disk_pct').map((a) => brief(a, { value: a.disk_pct })),
+    },
+    network: {
+      total_rx: withNet.reduce((p, a) => p + a.net_rx, 0), total_tx: withNet.reduce((p, a) => p + a.net_tx, 0), reporting: withNet.length,
+      top: top(withNet, 'net_total').map((a) => brief(a, { rx: a.net_rx, tx: a.net_tx })),
+    },
+    patching: {
+      scanned: scanned.length, never_scanned: agents.length - scanned.length,
+      stale: count(scanned, (a) => a.updates_checked_at < staleScan),
+      pending: agents.reduce((p, a) => p + (a.pending_updates || 0), 0),
+      security: agents.reduce((p, a) => p + (a.security_updates || 0), 0),
+      devices_pending: count(agents, (a) => a.pending_updates > 0), devices_security: count(agents, (a) => a.security_updates > 0),
+      up_to_date: count(scanned, (a) => !a.pending_updates), reboot_required: count(agents, (a) => a.reboot_required),
+      top: top(agents, 'pending_updates').filter((a) => a.pending_updates > 0)
+        .map((a) => brief(a, { pending: a.pending_updates, security: a.security_updates || 0, reboot: !!a.reboot_required })),
+    },
+    agents: { current: agents.length - outdated.length, outdated: outdated.length, offline: count(agents, (a) => !a.online) },
+    servers, workstations,
+    problem_devices: count(agents, (a) => worst.has(a.id) || !a.online),
+    health: {
+      long_uptime: longUp.sort((x, y) => x.boot_time - y.boot_time).slice(0, 6).map((a) => brief(a, { boot_time: a.boot_time })),
+      long_uptime_count: longUp.length,
+      long_offline: longOff.sort((x, y) => x.last_seen - y.last_seen).slice(0, 6).map((a) => brief(a)),
+      long_offline_count: longOff.length,
+      recently_offline: agents.filter((a) => !a.online && !a.maintenance).sort((x, y) => y.last_seen - x.last_seen).slice(0, 6).map((a) => brief(a)),
+    },
+    os: [...osCounts].map(([name, n]) => ({ name, n })).sort((x, y) => y.n - x.n),
+    clients: clients.sort((x, y) => (y.alerts - x.alerts) || (y.devices - x.devices)),
+    trend,
     jobs_24h: Object.fromEntries(jobStats.map((r) => [r.status, r.n])),
-    top_cpu: agents.filter((a) => a.online && a.cpu_pct != null).sort((x, y) => y.cpu_pct - x.cpu_pct).slice(0, 5),
-    top_disk: agents.filter((a) => a.disk_pct != null).sort((x, y) => y.disk_pct - x.disk_pct).slice(0, 5),
-    recent_alerts: all(`SELECT al.*, a.hostname FROM alerts al JOIN agents a ON a.id=al.agent_id
-                        WHERE al.status IN ('open','ack') ORDER BY al.updated_at DESC LIMIT 8`),
+    recent_alerts: alertRows.slice(0, 8),
     recent_jobs: all(`SELECT j.id, j.batch_id, j.name, j.status, j.created_at, j.created_by, a.hostname, j.agent_id
                       FROM jobs j JOIN agents a ON a.id=j.agent_id ORDER BY j.created_at DESC LIMIT 8`),
+    failed_jobs: all(`SELECT j.id, j.name, j.status, j.created_at, a.hostname FROM jobs j JOIN agents a ON a.id=j.agent_id
+                      WHERE j.created_at>? AND j.status IN ('failed','timeout','lost') ORDER BY j.created_at DESC LIMIT 5`, since),
+    schedules: all(`SELECT s.id, s.name, s.interval_minutes, s.last_run, s.enabled, sc.name AS script FROM schedules s
+                    JOIN scripts sc ON sc.id=s.script_id WHERE s.enabled=1`)
+      .map((x) => ({ ...x, next_run: (x.last_run || 0) + x.interval_minutes * 60000 }))
+      .sort((x, y) => x.next_run - y.next_run).slice(0, 6),
+    activity: u.role === 'admin' ? all('SELECT ts, username, action, detail FROM audit ORDER BY id DESC LIMIT 8') : null,
   };
 });
 

@@ -71,6 +71,7 @@ function connect({ session, token }) {
         if (q) $('#r-quality').value = q;
         send(`q ${$('#r-quality').value}`);
         canvas.focus();
+        drawPointer();
       } else if (m.state === 'waiting') {
         setStatus('waiting', 'info', 'Waiting for the device to start the remote session…');
       } else if (m.state === 'ended') {
@@ -127,6 +128,7 @@ function layout() {
     canvas.style.height = `${canvas.height}px`;
   }
   stage.classList.toggle('scroll', !fit);
+  if (typeof applyView === 'function') applyView();
 }
 window.addEventListener('resize', layout);
 
@@ -153,55 +155,147 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---------- touch (phones/tablets) ----------
-// tap = left click, long-press = right click, drag = left-button drag, two fingers = scroll wheel
-let touch = null;
-const LONG_PRESS = 550;
+// Two modes (toolbar "Touch" selector, remembered per browser):
+//  trackpad (default): the screen works like a laptop touchpad. Slide one finger to move the pointer,
+//    tap = click, double-tap and hold then slide = drag, long-press or two-finger tap = right-click,
+//    two fingers = scroll, pinch = zoom (the view follows the pointer).
+//  direct: tap exactly where you touch; slide = drag; long-press = right-click; two fingers = scroll / pinch zoom.
+const LONG_PRESS = 550, TAP_MS = 250, DOUBLE_TAP_MS = 300, MOVE_SLOP = 8, SPEED = 1.6;
+let touchMode = 'trackpad';
+try { touchMode = localStorage.getItem('hp-remote-touch') || 'trackpad'; } catch { /* storage unavailable */ }
+const cur = { x: 0.5, y: 0.5 };           // remote pointer position (0..1)
+const view = { zoom: 1, tx: 0, ty: 0 };   // pinch zoom + pan
+const pointerEl = $('#r-pointer');
+const posStr = () => `${cur.x.toFixed(5)} ${cur.y.toFixed(5)}`;
+let touch = null, lastTapEnd = 0;
+
+function moveCursor(nx, ny) {
+  cur.x = Math.min(1, Math.max(0, nx));
+  cur.y = Math.min(1, Math.max(0, ny));
+  send(`mm ${posStr()}`);
+  followCursor();
+  drawPointer();
+}
+function drawPointer() {
+  const show = touchMode === 'trackpad' && canvas.width && connected;
+  pointerEl.classList.toggle('hidden', !show);
+  if (!show) return;
+  const r = canvas.getBoundingClientRect(), s = $('#r-stage').getBoundingClientRect();
+  pointerEl.style.transform = `translate(${r.left - s.left + cur.x * r.width}px, ${r.top - s.top + cur.y * r.height}px)`;
+}
+// keep the pointer inside the visible part of the stage while zoomed in
+function followCursor() {
+  if (view.zoom <= 1) return;
+  const s = $('#r-stage').getBoundingClientRect(), r = canvas.getBoundingClientRect();
+  const px = r.left + cur.x * r.width, py = r.top + cur.y * r.height, m = 50;
+  if (px < s.left + m) view.tx += s.left + m - px; else if (px > s.right - m) view.tx -= px - (s.right - m);
+  if (py < s.top + m) view.ty += s.top + m - py; else if (py > s.bottom - m) view.ty -= py - (s.bottom - m);
+  applyView();
+}
+function applyView() {
+  if (!canvas.width || !canvas.style.width) return;
+  const s = $('#r-stage');
+  const w = parseFloat(canvas.style.width) * view.zoom, h = parseFloat(canvas.style.height) * view.zoom;
+  const mx = Math.max(0, (w - s.clientWidth) / 2), my = Math.max(0, (h - s.clientHeight) / 2);
+  view.tx = Math.min(mx, Math.max(-mx, view.tx));
+  view.ty = Math.min(my, Math.max(-my, view.ty));
+  canvas.style.transform = view.zoom > 1 ? `translate(${view.tx}px, ${view.ty}px) scale(${view.zoom})` : '';
+  drawPointer();
+}
+const mid = (ts) => ({ x: (ts[0].clientX + ts[1].clientX) / 2, y: (ts[0].clientY + ts[1].clientY) / 2, d: Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY) });
+const click = (btn) => { send(`md ${btn} ${posStr()}`); send(`mu ${btn} ${posStr()}`); };
+const buzz = () => { if (navigator.vibrate) navigator.vibrate(15); };
+
 canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
+  const now = Date.now();
   if (e.touches.length >= 2) {
-    if (touch) { clearTimeout(touch.timer); if (touch.down) send(`mu 0 ${touch.pos}`); }
-    touch = { two: true, y: (e.touches[0].clientY + e.touches[1].clientY) / 2, acc: 0 };
+    if (touch) { clearTimeout(touch.timer); if (touch.down) send(`mu 0 ${posStr()}`); }
+    const m = mid(e.touches);
+    touch = { two: true, start: now, last: m, startD: m.d, startZoom: view.zoom, acc: 0, gesture: null };
     return;
   }
   const t = e.touches[0];
-  const pos = norm(t);
-  touch = { x: t.clientX, y: t.clientY, pos, moved: false, down: false, long: false };
-  send(`mm ${pos}`);
+  touch = { x: t.clientX, y: t.clientY, lx: t.clientX, ly: t.clientY, start: now, moved: false, down: false, long: false };
+  if (touchMode === 'direct') {
+    const r = canvas.getBoundingClientRect();
+    moveCursor((t.clientX - r.left) / r.width, (t.clientY - r.top) / r.height);
+  } else if (now - lastTapEnd < DOUBLE_TAP_MS) {
+    // second tap of a double-tap: hold the button so sliding drags
+    touch.dragArmed = true;
+  }
   touch.timer = setTimeout(() => {
-    if (touch && !touch.moved && !touch.two) { touch.long = true; send(`md 2 ${pos}`); send(`mu 2 ${pos}`); if (navigator.vibrate) navigator.vibrate(15); }
+    if (touch && !touch.moved && !touch.two && !touch.dragArmed) { touch.long = true; click(2); buzz(); }
   }, LONG_PRESS);
 }, { passive: false });
+
 canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
   if (!touch) return;
   if (touch.two) {
     if (e.touches.length < 2) return;
-    const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-    touch.acc += touch.y - y; // fingers moving up scrolls the content down
-    touch.y = y;
-    while (Math.abs(touch.acc) >= 40) { send(`wh ${touch.acc > 0 ? -120 : 120}`); touch.acc -= Math.sign(touch.acc) * 40; }
+    const m = mid(e.touches);
+    // decide once whether this is a pinch (distance changes) or a scroll (fingers move together)
+    if (!touch.gesture) {
+      if (Math.abs(m.d - touch.startD) > 24) touch.gesture = 'pinch';
+      else if (Math.abs(m.y - touch.last.y) + Math.abs(m.x - touch.last.x) > 10) touch.gesture = 'scroll';
+    }
+    if (touch.gesture === 'pinch') {
+      view.zoom = Math.min(5, Math.max(1, touch.startZoom * (m.d / touch.startD)));
+      if (view.zoom === 1) { view.tx = 0; view.ty = 0; }
+      view.tx += m.x - touch.last.x; view.ty += m.y - touch.last.y; // two-finger pan while zoomed
+      applyView();
+    } else if (touch.gesture === 'scroll') {
+      touch.acc += touch.last.y - m.y; // fingers moving up scrolls the content down
+      while (Math.abs(touch.acc) >= 40) { send(`wh ${touch.acc > 0 ? -120 : 120}`); touch.acc -= Math.sign(touch.acc) * 40; }
+    }
+    touch.last = m;
     return;
   }
   const t = e.touches[0];
-  if (!touch.moved && Math.hypot(t.clientX - touch.x, t.clientY - touch.y) > 8) {
+  if (!touch.moved && Math.hypot(t.clientX - touch.x, t.clientY - touch.y) > MOVE_SLOP) {
     touch.moved = true;
     clearTimeout(touch.timer);
-    if (!touch.long) { send(`md 0 ${touch.pos}`); touch.down = true; }
+    // direct mode: sliding drags; trackpad mode: sliding only drags after a double-tap
+    if (!touch.long && (touchMode === 'direct' || touch.dragArmed)) { send(`md 0 ${posStr()}`); touch.down = true; }
   }
-  if (touch.moved) { touch.pos = norm(t); send(`mm ${touch.pos}`); }
+  if (!touch.moved) return;
+  if (touchMode === 'direct') {
+    const r = canvas.getBoundingClientRect();
+    moveCursor((t.clientX - r.left) / r.width, (t.clientY - r.top) / r.height);
+  } else {
+    // relative movement, a little faster than the finger (scaled to the displayed desktop)
+    const r = canvas.getBoundingClientRect();
+    moveCursor(cur.x + ((t.clientX - touch.lx) * SPEED) / r.width, cur.y + ((t.clientY - touch.ly) * SPEED) / r.height);
+  }
+  touch.lx = t.clientX; touch.ly = t.clientY;
 }, { passive: false });
+
 const touchEnd = (e) => {
   e.preventDefault();
   if (!touch || e.touches.length) return; // wait until every finger is up
   clearTimeout(touch.timer);
-  if (!touch.two) {
-    if (touch.down) send(`mu 0 ${touch.pos}`);
-    else if (!touch.long) { send(`md 0 ${touch.pos}`); send(`mu 0 ${touch.pos}`); }
+  const quick = Date.now() - touch.start < TAP_MS;
+  if (touch.two) {
+    if (!touch.gesture && quick) { click(2); buzz(); } // two-finger tap = right-click
+  } else if (touch.down) {
+    send(`mu 0 ${posStr()}`);
+  } else if (!touch.long && !touch.moved) {
+    click(0);
+    lastTapEnd = touch.dragArmed ? 0 : Date.now();
   }
   touch = null;
 };
 canvas.addEventListener('touchend', touchEnd, { passive: false });
 canvas.addEventListener('touchcancel', touchEnd, { passive: false });
+
+$('#r-touch').value = touchMode;
+$('#r-touch').addEventListener('change', (e) => {
+  touchMode = e.target.value;
+  try { localStorage.setItem('hp-remote-touch', touchMode); } catch { /* storage unavailable */ }
+  drawPointer();
+});
+$('#r-zoom-reset').addEventListener('click', () => { view.zoom = 1; view.tx = 0; view.ty = 0; applyView(); });
 
 // On-screen keyboard: a hidden text field receives the phone keyboard's input.
 const kbd = $('#r-kbd');

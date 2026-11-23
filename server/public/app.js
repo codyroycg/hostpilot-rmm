@@ -247,35 +247,139 @@ function renderLogin() {
 }
 
 // ---------------- dashboard ----------------
+const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const devLink = (a, right) => `<tr class="clickable" data-href="#/devices/${a.id}"><td>${statusDot(a)}<strong>${esc(a.hostname)}</strong>${a.client_name ? `<div class="small muted">${esc(a.client_name)}</div>` : ''}</td><td class="right">${right}</td></tr>`;
+const listCard = (title, rows, empty, link = '') => `<div class="card flush"><h2 class="row" style="justify-content:space-between">${title}${link}</h2>
+  <div class="table-wrap"><table class="dash"><tbody>${rows || `<tr><td class="empty">${empty}</td></tr>`}</tbody></table></div></div>`;
+
+// ---- dashboard widgets: donuts, bar charts and count legends ----
+const WC = { red: '#e53b2f', amber: '#f4b400', blue: '#1f7fd1', gray: '#7b8591', green: '#21a446', pink: '#e2338f', teal: '#14b3a4', purple: '#8b5cf6', olive: '#b5b52a', orange: '#f07c1b' };
+// parts: [[value, color, label, href?]]
+function wLegend(parts) {
+  return `<div class="wlegend">${parts.map(([v, c, l, href]) => `<${href ? `a href="${href}"` : 'div'} class="wl-row"><span class="wl-n" style="background:${c}">${v}</span><span class="wl-l">${esc(l)}</span></${href ? 'a' : 'div'}>`).join('')}</div>`;
+}
+function wDonut(parts, center) {
+  const total = parts.reduce((s, [v]) => s + v, 0);
+  const R = 42, C = 2 * Math.PI * R;
+  let off = 0;
+  const segs = total ? parts.filter(([v]) => v > 0).map(([v, c, l]) => {
+    const len = (v / total) * C;
+    const seg = `<circle r="${R}" cx="60" cy="60" fill="none" stroke="${c}" stroke-width="18" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 60 60)"><title>${esc(l)}: ${v}</title></circle>`;
+    off += len;
+    return seg;
+  }).join('') : '';
+  return `<svg class="wdonut" viewBox="0 0 120 120"><circle r="${R}" cx="60" cy="60" fill="none" stroke="var(--panel-2)" stroke-width="18"/>${segs}
+    <text x="60" y="60" text-anchor="middle" dominant-baseline="central" class="wdonut-n">${center}</text></svg>`;
+}
+function wBars(parts) {
+  const max = Math.max(...parts.map(([v]) => v), 0);
+  const step = max <= 4 ? 1 : max <= 10 ? 2 : niceCeil(max / 5);
+  const top = Math.max(step, Math.ceil(max / step) * step);
+  const W = 170, H = 120, L = 22, B = 14, bw = (W - L) / parts.length;
+  const y = (v) => H - B - (v / top) * (H - B - 6);
+  const ticks = []; for (let v = 0; v <= top; v += step) ticks.push(v);
+  return `<svg class="wbars" viewBox="0 0 ${W} ${H}">${ticks.map((v) => `<line x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}" class="wgrid-line"/><text x="${L - 4}" y="${y(v)}" class="wtick" text-anchor="end" dominant-baseline="central">${v}</text>`).join('')}
+    ${parts.map(([v, c, l], i) => `<rect x="${L + i * bw + bw * 0.18}" y="${y(v)}" width="${bw * 0.64}" height="${Math.max(0, H - B - y(v))}" fill="${c}"><title>${esc(l)}: ${v}</title></rect>`).join('')}</svg>`;
+}
+function wHBars(parts) {
+  const max = Math.max(...parts.map(([v]) => v), 1);
+  return `<div class="whbars">${parts.map(([v, c, l]) => `<div class="whb-row"><div class="whb-track"><span style="width:${(v / max) * 100}%;background:${c}"></span></div></div>`).join('')}</div>`;
+}
+const widget = (title, sub, body, { span = 1, href = '' } = {}) => `<section class="wcard${span > 1 ? ` span-${span}` : ''}">
+  <div class="wtitle">${href ? `<a href="${href}">${esc(title)}</a>` : esc(title)}</div><div class="wsub">${esc(sub)}</div><div class="wbody">${body}</div></section>`;
+const wKpi = (title, value, icon, cls, href) => `<a class="wcard wkpi ${cls}" href="${href}"><div class="wtitle">${esc(title)}</div><div class="wkpi-v">${icon}<span>${value}</span></div></a>`;
+const ICON_DEV = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/></svg>';
+const ICON_WARN = '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2 22 12 12 22 2 12z" fill="#e53b2f"/><path d="M12 7v6M12 16.5v.5" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>';
+
 async function pageDashboard(view) {
   const draw = async () => {
     const d = await api('GET', '/api/dashboard');
-    const t = d.totals;
+    const t = d.totals, r = d.resources, p = d.patching, n = d.network, h = d.health;
     const failed = (d.jobs_24h.failed || 0) + (d.jobs_24h.timeout || 0) + (d.jobs_24h.lost || 0);
+    const jobsTotal = Object.values(d.jobs_24h).reduce((a, b) => a + b, 0);
+    if (t.devices === 0) {
+      view.innerHTML = `<div class="page-head"><h1>Dashboard</h1></div><div class="card"><h2>Get started</h2>
+        <p>1. Create a <a href="#/clients">client</a>. 2. On the client page, download the installer (Setup.exe or .sh) or copy the one-line command. 3. Run it on your Windows or Linux hosts. They appear here within a minute.</p></div>`;
+      return;
+    }
+    const trendRows = d.trend.map((x) => ({ ts: x.ts + 1800000, cpu: x.cpu, mem: x.mem, devices: pct(x.devices, t.devices), net: x.net }));
+    const sv = d.servers, ws = d.workstations;
+    const osColors = [WC.blue, WC.pink, WC.teal, WC.amber, WC.purple, WC.gray];
+    const shortOs = (s) => s.replace(/^Microsoft /, '').replace(/ (Standard|Datacenter|Enterprise|Professional)\b.*$/, '').replace(/ GNU\/Linux/, '').replace(/ LTS$/, '');
+    const osParts = d.os.slice(0, 5).map((o, i) => [o.n, osColors[i], shortOs(o.name)]);
+    const otherOs = d.os.slice(5).reduce((s, o) => s + o.n, 0);
+    if (otherOs) osParts.push([otherOs, WC.gray, 'Other']);
+    const reboot = [[sv.uptime.d30, WC.blue, 'Servers > 30 days'], [sv.uptime.d60, WC.pink, 'Servers > 60 days'], [sv.uptime.d90, WC.teal, 'Servers > 90 days'],
+      [ws.uptime.d30, WC.purple, 'Workstations > 30 days'], [ws.uptime.d60, WC.olive, 'Workstations > 60 days'], [ws.uptime.d90, WC.orange, 'Workstations > 90 days']];
+    const patchParts = [[p.devices_security, WC.red, 'Security'], [p.devices_pending - p.devices_security, WC.amber, 'Pending'],
+      [p.reboot_required, WC.blue, 'Reboot'], [p.never_scanned, WC.gray, 'Not scanned'], [p.up_to_date, WC.green, 'Up to date']];
+    const resParts = [[r.high_cpu, WC.red, 'High CPU'], [r.high_mem, WC.amber, 'High memory'], [r.low_disk, WC.orange, 'Low disk'],
+      [Math.max(0, t.online - Math.max(r.high_cpu, r.high_mem, 0)), WC.green, 'Normal']];
+    const agentParts = [[d.agents.outdated, WC.amber, 'Updating'], [d.agents.offline, WC.gray, 'Offline'], [d.agents.current, WC.green, 'Up to date']];
+    const jobParts = [[d.jobs_24h.failed || 0, WC.red, 'Failed'], [d.jobs_24h.timeout || 0, WC.amber, 'Timed out'],
+      [(d.jobs_24h.running || 0) + (d.jobs_24h.queued || 0), WC.blue, 'Running'], [d.jobs_24h.lost || 0, WC.gray, 'Lost'], [d.jobs_24h.success || 0, WC.green, 'Succeeded']];
+    const clientParts = [[d.clients.filter((c) => c.alerts).length, WC.red, 'With alerts'], [d.clients.filter((c) => !c.alerts && c.patches).length, WC.amber, 'Need patches'],
+      [d.clients.filter((c) => !c.alerts && !c.patches && c.devices).length, WC.green, 'Healthy'], [d.clients.filter((c) => !c.devices).length, WC.gray, 'No devices']];
+
     view.innerHTML = `
-      <div class="tiles">
-        <a class="tile" href="#/devices" data-preset=""><div class="l">Devices</div><div class="v">${t.devices}</div></a>
-        <a class="tile ok" href="#/devices" data-preset="online"><div class="l">Online</div><div class="v">${t.online}</div></a>
-        <a class="tile ${t.offline ? 'bad' : ''}" href="#/devices" data-preset="offline"><div class="l">Offline</div><div class="v">${t.offline}</div></a>
-        <a class="tile ${t.open_alerts ? 'warn' : ''}" href="#/alerts"><div class="l">Active alerts</div><div class="v">${t.open_alerts}</div></a>
-        <a class="tile" href="#/clients"><div class="l">Clients</div><div class="v">${t.clients}</div></a>
-        <a class="tile ${failed ? 'bad' : ''}" href="#/jobs"><div class="l">Jobs 24h (failed)</div><div class="v">${Object.values(d.jobs_24h).reduce((a, b) => a + b, 0)} <span class="small muted">(${failed})</span></div></a>
+      <div class="page-head"><h1>Dashboard: Monitoring</h1><span class="small muted">Updated ${new Date(d.generated_at).toLocaleTimeString()} · refreshes every 15 s</span></div>
+
+      <div class="wgrid">
+        ${wKpi('Devices', t.devices, ICON_DEV, '', '#/devices')}
+        ${wKpi('Problem devices', d.problem_devices, d.problem_devices ? ICON_WARN : '', d.problem_devices ? 'bad' : 'ok', '#/devices')}
+        ${wKpi('Active alerts', t.open_alerts, t.open_alerts ? ICON_WARN : '', t.open_alerts ? 'bad' : 'ok', '#/alerts')}
+        ${wKpi('Security patches missing', p.devices_security, p.devices_security ? ICON_WARN : '', p.devices_security ? 'bad' : 'ok', '#/patching')}
+
+        ${widget('Problem servers', 'With one or more active alerts', `<div class="wsplit">${wDonut([[sv.problems.failing, WC.red, 'Failing'], [sv.problems.warning, WC.amber, 'Warning'], [sv.problems.healthy, WC.gray, 'Healthy']], sv.total)}
+          ${wLegend([[sv.problems.failing, WC.red, 'Failing', '#/alerts'], [sv.problems.warning, WC.amber, 'Warning', '#/alerts'], [sv.problems.healthy, WC.gray, 'Healthy']])}</div>`)}
+        ${widget('Server status', 'All clients', `<div class="wsplit">${wBars([[sv.status.offline, WC.red, 'Offline'], [sv.status.reboot, WC.blue, 'Reboot'], [sv.status.patches, WC.gray, 'Patches pending'], [sv.status.online, WC.green, 'Online']])}
+          ${wLegend([[sv.status.offline, WC.red, 'Offline'], [sv.status.reboot, WC.blue, 'Reboot'], [sv.status.patches, WC.gray, 'Patches'], [sv.status.online, WC.green, 'Online']])}</div>`)}
+        ${widget('Problem workstations', 'With one or more active alerts', `<div class="wsplit">${wDonut([[ws.problems.failing, WC.red, 'Failing'], [ws.problems.warning, WC.amber, 'Warning'], [ws.problems.healthy, WC.gray, 'Healthy']], ws.total)}
+          ${wLegend([[ws.problems.failing, WC.red, 'Failing', '#/alerts'], [ws.problems.warning, WC.amber, 'Warning', '#/alerts'], [ws.problems.healthy, WC.gray, 'Healthy']])}</div>`)}
+        ${widget('Workstation status', 'All clients', `<div class="wsplit">${wBars([[ws.status.offline, WC.red, 'Offline'], [ws.status.reboot, WC.blue, 'Reboot'], [ws.status.patches, WC.gray, 'Patches pending'], [ws.status.online, WC.green, 'Online']])}
+          ${wLegend([[ws.status.offline, WC.red, 'Offline'], [ws.status.reboot, WC.blue, 'Reboot'], [ws.status.patches, WC.gray, 'Patches'], [ws.status.online, WC.green, 'Online']])}</div>`)}
+
+        ${widget('Device types', 'All clients', `<div class="wsplit">${wDonut([[sv.total, WC.blue, 'Servers'], [ws.total, WC.pink, 'Workstations']], t.devices)}
+          ${wLegend([[sv.total, WC.blue, 'Servers'], [ws.total, WC.pink, 'Workstations'], [t.maintenance, WC.amber, 'Maintenance']])}</div>`)}
+        ${widget('Devices by OS', 'All clients', `<div class="wsplit">${wDonut(osParts, t.devices)}${wLegend(osParts.map(([v, c, l]) => [v, c, l.length > 26 ? `${l.slice(0, 25)}…` : l]))}</div>`)}
+        ${widget('Last reboot time', 'Online devices', `<div class="wsplit wide">${wHBars(reboot)}${wLegend(reboot)}</div>`, { span: 2 })}
+
+        ${widget('Patch status', 'All devices', `<div class="wsplit">${wBars(patchParts)}${wLegend(patchParts.map(([v, c, l]) => [v, c, l, '#/patching']))}</div>`, { href: '#/patching' })}
+        ${widget('Resource alerts', `Over ${r.thresholds.cpu}% CPU / ${r.thresholds.mem}% memory / ${r.thresholds.disk}% disk`, `<div class="wsplit">${wBars(resParts)}${wLegend(resParts)}</div>`)}
+        ${widget('Agent status', 'HostPilot agents', `<div class="wsplit">${wBars(agentParts)}${wLegend(agentParts)}</div>`)}
+        ${widget('Jobs (24 h)', 'Scripts and tasks', `<div class="wsplit">${wBars(jobParts)}${wLegend(jobParts.map(([v, c, l]) => [v, c, l, '#/jobs']))}</div>`, { href: '#/jobs' })}
+
+        ${widget('Network right now', `${plural(n.reporting, 'device')} reporting`, `<div class="wnet"><div><div class="small muted">Download</div><div class="big" style="color:${WC.teal}">${fmtBits(n.total_rx * 8)}</div></div>
+          <div><div class="small muted">Upload</div><div class="big" style="color:${WC.pink}">${fmtBits(n.total_tx * 8)}</div></div></div>`)}
+        ${widget('Average utilisation', 'Online devices', `<div class="dash-meter"><span class="small">CPU</span>${meter(r.avg_cpu)}</div><div class="dash-meter"><span class="small">Memory</span>${meter(r.avg_mem)}</div><div class="dash-meter"><span class="small">Fullest disk</span>${meter(r.avg_disk)}</div>`)}
+        ${widget('Clients', `${plural(t.clients, 'client')}${t.unassigned ? ` · ${plural(t.unassigned, 'device')} unassigned` : ''}`, `<div class="wsplit">${wDonut(clientParts, t.clients)}${wLegend(clientParts.map(([v, c, l]) => [v, c, l, '#/clients']))}</div>`, { href: '#/clients' })}
       </div>
+
+      <div class="dash-section">Trends & details</div>
       <div class="grid cols-2">
-        <div class="card flush"><h2>Active alerts</h2><div class="table-wrap"><table><tbody>
-          ${d.recent_alerts.map((a) => `<tr class="clickable" data-href="#/devices/${a.agent_id}/alerts"><td>${badge(a.severity)}</td><td><strong>${esc(a.hostname)}</strong><div class="small muted">${esc(a.message)}</div></td><td class="right muted small nowrap">${fmtAgo(a.created_at)}</td></tr>`).join('') || '<tr><td class="empty">No active alerts 🎉</td></tr>'}
-        </tbody></table></div></div>
-        <div class="card flush"><h2>Recent jobs</h2><div class="table-wrap"><table><tbody>
-          ${d.recent_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)} · ${esc(j.created_by)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join('') || '<tr><td class="empty">No jobs yet</td></tr>'}
-        </tbody></table></div></div>
-        <div class="card flush"><h2>Highest CPU</h2><div class="table-wrap"><table><tbody>
-          ${d.top_cpu.map((a) => `<tr class="clickable" data-href="#/devices/${a.id}"><td>${statusDot(a)}${esc(a.hostname)}</td><td style="width:45%">${meter(a.cpu_pct)}</td></tr>`).join('') || '<tr><td class="empty">No data</td></tr>'}
-        </tbody></table></div></div>
-        <div class="card flush"><h2>Fullest disks</h2><div class="table-wrap"><table><tbody>
-          ${d.top_disk.map((a) => `<tr class="clickable" data-href="#/devices/${a.id}"><td>${statusDot(a)}${esc(a.hostname)}</td><td style="width:45%">${meter(a.disk_pct)}</td></tr>`).join('') || '<tr><td class="empty">No data</td></tr>'}
-        </tbody></table></div></div>
+        <div class="card"><h2>Fleet trend (24 h)</h2>${trendRows.length > 1 ? chart(trendRows, [['devices', 'Devices reporting %', 'var(--ok)'], ['cpu', 'Avg CPU', 'var(--c1)'], ['mem', 'Avg memory', 'var(--c2)']], { hours: 24 }) : '<div class="muted">Collecting data… (hourly points appear as devices report)</div>'}</div>
+        <div class="card"><h2>Network traffic (24 h, whole fleet)</h2>${trendRows.filter((x) => x.net != null).length > 1 ? chart(trendRows, [['net', 'Download + upload', 'var(--c4)']], { hours: 24, rate: true }) : '<div class="muted">Collecting data… (hourly points appear as devices report)</div>'}</div>
       </div>
-      ${t.devices === 0 ? `<div class="card" style="margin-top:16px"><h2>Get started</h2><p>1. Create a <a href="#/clients">client</a>. 2. Generate an install token on the client page. 3. Run the one-line installer on your Windows or Linux hosts.</p></div>` : ''}`;
+
+      <div class="grid cols-3" style="margin-top:16px">
+        ${listCard('Active alerts', d.recent_alerts.map((a) => `<tr class="clickable" data-href="#/devices/${a.agent_id}/alerts"><td>${badge(a.severity, a.severity === 'critical' ? 'bad' : 'warn')}</td><td><strong>${esc(a.hostname)}</strong><div class="small muted">${esc(a.message)}</div></td><td class="right muted small nowrap">${fmtAgo(a.created_at)}</td></tr>`).join(''), 'No active alerts 🎉', '<a href="#/alerts" class="small">All alerts →</a>')}
+        ${listCard('Clients', d.clients.slice(0, 8).map((c) => `<tr class="clickable" data-href="#/clients/${c.id}"><td><strong>${esc(c.name)}</strong><div class="small muted">${c.online}/${c.devices} online</div></td>
+          <td class="right">${c.alerts ? badge(`${c.alerts} alert${c.alerts > 1 ? 's' : ''}`, 'bad') : ''} ${c.patches ? badge(`${c.patches} patches`, 'warn') : ''}${!c.alerts && !c.patches ? badge('healthy', 'ok') : ''}</td></tr>`).join(''), 'No clients yet', '<a href="#/clients" class="small">All clients →</a>')}
+        ${listCard('Top network users', n.top.map((a) => devLink(a, `<span class="small"><span style="color:var(--c4)">↓ ${fmtBits(a.rx * 8)}</span> · <span style="color:var(--c5)">↑ ${fmtBits(a.tx * 8)}</span></span>`)).join(''), 'No network data yet')}
+        ${listCard('Highest CPU', r.top_cpu.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data')}
+        ${listCard('Highest memory', r.top_mem.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data')}
+        ${listCard('Fullest disks', r.top_disk.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data')}
+        ${listCard('Recently offline', h.recently_offline.map((a) => devLink(a, `<span class="small muted">${fmtAgo(a.last_seen)}</span>`)).join(''), 'All devices are online 🎉',
+          h.long_offline_count ? `<span class="small bad-text">${h.long_offline_count} offline &gt; 7 days</span>` : '')}
+        ${listCard('Running longest without reboot', h.long_uptime.map((a) => devLink(a, `<span class="small">${fmtDur(Date.now() - a.boot_time)}</span>`)).join(''), 'No device has been up for more than 30 days',
+          h.long_uptime_count ? `<span class="small muted">${h.long_uptime_count} up &gt; 30 days</span>` : '')}
+        ${listCard('Scheduled automation', d.schedules.map((s) => `<tr class="clickable" data-href="#/automation"><td><strong>${esc(s.name || s.script)}</strong><div class="small muted">${esc(s.script)} · every ${fmtDur(s.interval_minutes * 60000)}</div></td>
+          <td class="right small nowrap">${s.next_run <= Date.now() ? 'due now' : `in ${fmtDur(s.next_run - Date.now())}`}</td></tr>`).join(''), 'No scheduled tasks', '<a href="#/automation" class="small">Automation →</a>')}
+        ${listCard('Recent jobs', d.recent_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)} · ${esc(j.created_by)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join(''), 'No jobs yet', '<a href="#/jobs" class="small">Job history →</a>')}
+        ${listCard('Failed jobs (24 h)', d.failed_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join(''), 'No failed jobs 🎉')}
+        ${d.activity ? listCard('Recent activity', d.activity.map((x) => `<tr><td><strong>${esc(x.username)}</strong> <span class="mono small">${esc(x.action)}</span><div class="small muted">${esc(x.detail || '')}</div></td><td class="right muted small nowrap">${fmtAgo(x.ts)}</td></tr>`).join(''), 'No activity yet', '<a href="#/settings" class="small">Audit log →</a>') : ''}
+      </div>`;
   };
   await draw();
   every(15000, draw);

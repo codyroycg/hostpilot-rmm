@@ -33,6 +33,11 @@
         <option value="91,69">Win+E (Explorer)</option>
         <option value="44">Print Screen</option>
       </select>
+      <select id="r-touch" class="touch-only" title="How touches control the mouse">
+        <option value="trackpad">Touch: trackpad</option>
+        <option value="direct">Touch: tap where you touch</option>
+      </select>
+      <button class="btn sm touch-only" id="r-zoom-reset" title="Zoom back out (pinch to zoom in)">Zoom 1:1</button>
       <button class="btn sm touch-only" id="r-kbd-btn" title="Show the on-screen keyboard">Keyboard</button>
       <button class="btn sm" id="r-type">Type text…</button>
       <button class="btn sm" id="r-fit">Actual size</button>
@@ -42,6 +47,7 @@
   </header>
   <div class="rstage" id="r-stage">
     <canvas id="r-canvas" tabindex="0"></canvas>
+    <div id="r-pointer" class="rpointer hidden" aria-hidden="true"><svg viewBox="0 0 16 24" width="16" height="24"><path d="M1 1v19l5-5 3.5 7.5 3-1.4L9 13.6h7z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
     <input id="r-kbd" class="kbd-sink" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="On-screen keyboard input">
     <div class="roverlay" id="r-overlay">Starting remote session…</div>
   </div>
