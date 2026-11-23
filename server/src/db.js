@@ -98,6 +98,12 @@ addColumn('agents', 'updates_checked_at', 'INTEGER');
 addColumn('agents', 'pending_updates', 'INTEGER');
 addColumn('agents', 'security_updates', 'INTEGER');
 addColumn('agents', 'reboot_required', 'INTEGER DEFAULT 0');
+addColumn('agents', 'net_ifaces', 'TEXT');        // JSON list of network interfaces
+addColumn('agents', 'net_rx_total', 'INTEGER');   // last byte counters, to turn into rates
+addColumn('agents', 'net_tx_total', 'INTEGER');
+addColumn('agents', 'net_ts', 'INTEGER');
+addColumn('metrics', 'net_rx', 'REAL');           // bytes/second
+addColumn('metrics', 'net_tx', 'REAL');
 
 const stmtCache = new Map();
 function stmt(sql) {

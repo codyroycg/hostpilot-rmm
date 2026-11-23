@@ -46,10 +46,11 @@ export async function liveSample(ctx) {
   let body = '';
   for await (const c of ctx.req) { body += c; if (body.length > 200) break; }
   if (Date.now() > s.until) { sessions.delete(ctx.params.id); return 'stop'; }
-  const [cpu, mem, disk] = body.trim().split(/\s+/);
+  const [cpu, mem, disk, rx, tx] = body.trim().split(/\s+/);
   const now = Date.now();
   s.lastSample = now;
-  s.samples.push({ ts: now, cpu: num(cpu), mem: num(mem), disk: num(disk) });
+  const rate = (v) => { const n = Number(v); return v != null && v !== '' && Number.isFinite(n) && n >= 0 ? n : null; };
+  s.samples.push({ ts: now, cpu: num(cpu), mem: num(mem), disk: num(disk), net_rx: rate(rx), net_tx: rate(tx) });
   while (s.samples.length && s.samples[0].ts < now - KEEP_MS) s.samples.shift();
   return 'ok';
 }

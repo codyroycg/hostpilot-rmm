@@ -43,6 +43,77 @@ function Invoke-Api([string]$Method, [string]$Path, $Body = $null, [int]$Timeout
 
 function ConvertTo-UnixMs([datetime]$d) { ([DateTimeOffset]$d).ToUnixTimeMilliseconds() }
 
+function Get-IfaceIps($n) {
+    # leading comma: keep a one-address result as an array (JSON list)
+    return , @($n.GetIPProperties().UnicastAddresses | ForEach-Object { ($_.Address.IPAddressToString -split '%')[0] } |
+        Where-Object { $_ -notlike 'fe80*' -and $_ -notlike '169.254.*' })
+}
+
+# Network interfaces (incl. VPN adapters and Windows VPN connections) + total byte counters
+function Get-NetInfo {
+    $vpnRx = 'VPN|TAP-|Wintun|WireGuard|OpenVPN|AnyConnect|Fortinet|FortiClient|GlobalProtect|PANGP|Juniper|Pulse Secure|Ivanti|Zscaler|Tailscale|ZeroTier|NordLynx|SonicWall|Check Point|WatchGuard|Cisco Secure|Mullvad|ProtonVPN|Cloudflare WARP|WAN Miniport'
+    $nics = @{}
+    foreach ($n in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) { $nics[[string]$n.Id] = $n }
+    $make = @{}
+    foreach ($w in @(Get-CimInstance Win32_NetworkAdapter -ErrorAction SilentlyContinue)) { if ($w.GUID) { $make[[string]$w.GUID] = [string]$w.Manufacturer } }
+    $list = New-Object Collections.ArrayList
+    $seen = @{}
+    $rx = [int64]0; $tx = [int64]0; $hwRx = [int64]0; $hwTx = [int64]0; $hw = 0
+    foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue)) {
+        $guid = [string]$a.InterfaceGuid
+        $n = $nics[$guid]
+        $seen[$guid] = 1
+        $seen["name:$($a.Name)"] = 1
+        $desc = [string]$a.InterfaceDescription
+        $isVpn = ($desc -match $vpnRx) -or ($a.Name -match $vpnRx)
+        $kind = if ($isVpn) { 'vpn' }
+            elseif ($a.NdisPhysicalMedium -eq 9 -or $a.PhysicalMediaType -match '802\.11|Wireless LAN|Native 802') { 'wifi' }
+            elseif ($a.NdisPhysicalMedium -eq 10 -or $a.PhysicalMediaType -match 'Bluetooth') { 'bluetooth' }
+            elseif ($a.NdisPhysicalMedium -in 8, 12 -or $a.PhysicalMediaType -match 'Wireless WAN|Mobile') { 'cellular' }
+            elseif (-not $a.HardwareInterface) { 'virtual' }
+            elseif ($a.MediaType -eq '802.3') { 'ethernet' } else { 'other' }
+        $ips = @()
+        if ($n) {
+            try {
+                $ips = Get-IfaceIps $n
+                $st = $n.GetIPStatistics()
+                $rx += $st.BytesReceived; $tx += $st.BytesSent
+                if ($a.HardwareInterface -and -not $isVpn) { $hwRx += $st.BytesReceived; $hwTx += $st.BytesSent; $hw++ }
+            } catch {}
+        }
+        $mk = $make[$guid]; if (-not $mk) { $mk = [string]$a.DriverProvider }
+        $up = [string]$a.Status -eq 'Up'
+        [void]$list.Add(@{
+            name = [string]$a.Name; make = $mk; model = $desc; kind = $kind; connected = $up
+            mac = ([string]$a.MacAddress).Replace('-', ':'); speed = $(if ($up) { [int64]$a.ReceiveLinkSpeed } else { 0 }); ips = $ips
+        })
+    }
+    # built-in Windows VPN connections only exist as interfaces while connected
+    foreach ($n in $nics.Values) {
+        if ([string]$n.NetworkInterfaceType -ne 'Ppp' -or $seen[[string]$n.Id]) { continue }
+        $seen["name:$($n.Name)"] = 1
+        [void]$list.Add(@{ name = [string]$n.Name; make = 'Microsoft'; model = 'Windows VPN connection'; kind = 'vpn'
+            connected = ([string]$n.OperationalStatus -eq 'Up'); mac = ''; speed = 0; ips = (Get-IfaceIps $n) })
+    }
+    # configured (disconnected) Windows VPN connections from the all-users and per-user phonebooks
+    $pbks = @(Join-Path $env:ProgramData 'Microsoft\Network\Connections\Pbk\rasphone.pbk')
+    $pbks += @(Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Network\Connections\Pbk\rasphone.pbk' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    foreach ($p in $pbks) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        $cur = $null
+        foreach ($line in [IO.File]::ReadAllLines($p)) {
+            if ($line -match '^\[(.+)\]$') { $cur = $Matches[1]; continue }
+            if ($cur -and $line -match '^Type=2$' -and -not $seen["name:$cur"]) {
+                $seen["name:$cur"] = 1
+                [void]$list.Add(@{ name = $cur; make = 'Microsoft'; model = 'Windows VPN connection'; kind = 'vpn'; connected = $false; mac = ''; speed = 0; ips = @() })
+            }
+        }
+    }
+    # traffic = physical adapters only (VPN traffic would otherwise be counted twice)
+    if ($hw) { $rx = $hwRx; $tx = $hwTx }
+    @{ ifaces = @($list); rx = $rx; tx = $tx }
+}
+
 function Get-Metrics {
     $os = Get-CimInstance Win32_OperatingSystem
     $cs = Get-CimInstance Win32_ComputerSystem
@@ -64,7 +135,10 @@ function Get-Metrics {
     if ($ver.DisplayVersion) { $osVersion = "$($ver.DisplayVersion) (build $($os.BuildNumber).$($ver.UBR))" }
     elseif ($ver.UBR) { $osVersion = "$($os.Version).$($ver.UBR)" }
 
-    @{
+    $net = $null
+    try { $net = Get-NetInfo } catch { Write-Log "network info failed: $($_.Exception.Message)" }
+
+    $m = @{
         hostname      = [string]$env:COMPUTERNAME
         cpu           = [double]$cpu
         mem           = [double]$memPct
@@ -83,6 +157,8 @@ function Get-Metrics {
         boot_time     = ConvertTo-UnixMs $os.LastBootUpTime
         agent_version = $MyVersion
     }
+    if ($net) { $m.net_ifaces = $net.ifaces; $m.net_rx = $net.rx; $m.net_tx = $net.tx }
+    $m
 }
 
 function Send-Inventory {

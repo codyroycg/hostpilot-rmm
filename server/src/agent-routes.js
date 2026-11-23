@@ -101,6 +101,17 @@ route('POST', '/api/agent/enroll', (ctx) => {
   return { agent_id: id, secret, checkin_seconds: getSettings().checkin_seconds };
 });
 
+const IFACE_KINDS = new Set(['ethernet', 'wifi', 'vpn', 'virtual', 'bluetooth', 'cellular', 'other']);
+function cleanIface(i) {
+  i = i && typeof i === 'object' ? i : {};
+  return {
+    name: str(i.name, 200) || '', make: str(i.make, 200) || '', model: str(i.model, 300) || '',
+    kind: IFACE_KINDS.has(i.kind) ? i.kind : 'other', connected: i.connected === true || i.connected === 1 || i.connected === '1',
+    mac: str(i.mac, 64) || '', speed: Math.max(0, num(i.speed) || 0),
+    ips: Array.isArray(i.ips) ? i.ips.slice(0, 16).map((x) => str(x, 64)).filter(Boolean) : [],
+  };
+}
+
 route('POST', '/api/agent/checkin', (ctx) => {
   const a = authAgent(ctx);
   const b = ctx.body;
@@ -118,13 +129,26 @@ route('POST', '/api/agent/checkin', (ctx) => {
     cpu_pct: cpu, mem_pct: mem,
     ip_addrs: ips ? JSON.stringify(ips) : null, disks: disks ? JSON.stringify(disks) : null,
   };
+  // network: interface list + byte counters -> bytes/second since the previous check-in
+  const now = Date.now();
+  let rxRate = null, txRate = null;
+  if (Array.isArray(b.net_ifaces)) fields.net_ifaces = JSON.stringify(b.net_ifaces.slice(0, 64).map(cleanIface));
+  const rxTot = num(b.net_rx), txTot = num(b.net_tx);
+  if (rxTot != null && txTot != null && rxTot >= 0 && txTot >= 0) {
+    const dt = (now - (a.net_ts || 0)) / 1000;
+    if (a.net_ts && dt >= 5 && dt <= 1800 && rxTot >= a.net_rx_total && txTot >= a.net_tx_total) { // counters reset on reboot
+      rxRate = (rxTot - a.net_rx_total) / dt;
+      txRate = (txTot - a.net_tx_total) / dt;
+    }
+    Object.assign(fields, { net_rx_total: rxTot, net_tx_total: txTot, net_ts: now });
+  }
   const keys = Object.keys(fields).filter((k) => fields[k] !== null);
   if (keys.length) {
     run(`UPDATE agents SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`, ...keys.map((k) => fields[k]), a.id);
   }
   const diskMax = disks && disks.length
     ? Math.max(...disks.filter((d) => d.total > 0).map((d) => ((d.total - d.free) / d.total) * 100), 0) : null;
-  run('INSERT INTO metrics(agent_id, ts, cpu, mem, disk) VALUES(?,?,?,?,?)', a.id, Date.now(), cpu, mem, diskMax);
+  run('INSERT INTO metrics(agent_id, ts, cpu, mem, disk, net_rx, net_tx) VALUES(?,?,?,?,?,?,?)', a.id, now, cpu, mem, diskMax, rxRate, txRate);
   evaluateThresholds({ ...a, hostname: fields.hostname || a.hostname }, disks);
   return { ok: true, checkin_seconds: getSettings().checkin_seconds };
 });

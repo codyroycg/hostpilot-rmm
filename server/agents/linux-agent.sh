@@ -47,6 +47,66 @@ cpu_pct() {
   if [ "$dt" -gt 0 ]; then echo $(( (100*(dt-di)) / dt )); else echo 0; fi
 }
 
+# Network interfaces (incl. VPN/tunnel devices) + byte counters. Prints a JSON fragment:
+#   "net_ifaces":[...],"net_rx":N,"net_tx":N
+net_info() {
+  local d n kind make model oper carrier conn mac speed ips rx tx out="" all_rx=0 all_tx=0 hw_rx=0 hw_tx=0 hw=0 dlink k v
+  for d in /sys/class/net/*; do
+    n="${d##*/}"
+    case "$n" in lo|veth*) continue ;; esac
+    kind=other; make=""; model=""
+    if [ -e "$d/device" ]; then
+      kind=ethernet
+      if command -v udevadm >/dev/null 2>&1; then
+        while IFS='=' read -r k v; do
+          case "$k" in
+            ID_VENDOR_FROM_DATABASE) make="$v" ;;
+            ID_MODEL_FROM_DATABASE) model="$v" ;;
+          esac
+        done < <(udevadm info -q property -p "$d" 2>/dev/null)
+      fi
+      if [ -z "$model" ]; then
+        dlink="$(readlink -f "$d/device/driver" 2>/dev/null)"; model="${dlink##*/}"
+        [ -n "$model" ] && model="$model driver"
+      fi
+      [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && kind=wifi
+      case "$(readlink -f "$d/device" 2>/dev/null)" in *bluetooth*|*/bnep*) kind=bluetooth ;; esac
+      case "$n" in wwan*|wwp*) kind=cellular ;; esac
+    else
+      kind=virtual
+      if [ -e "$d/tun_flags" ]; then
+        kind=vpn; model="TUN/TAP tunnel"
+      elif command -v ip >/dev/null 2>&1 && ip -d link show dev "$n" 2>/dev/null | grep -qw wireguard; then
+        kind=vpn; make="WireGuard"; model="WireGuard tunnel"
+      elif [ -d "$d/bridge" ]; then
+        model="Bridge"
+      fi
+    fi
+    case "$n" in
+      tun*|tap*|wg*|ppp*|tailscale*|zt*|nordlynx*|proton*|mullvad*|ipsec*|vti*|gpd*|cscotun*) kind=vpn ;;
+    esac
+    case "$n" in tailscale*) make="Tailscale" ;; zt*) make="ZeroTier" ;; esac
+    oper="$(cat "$d/operstate" 2>/dev/null)"; carrier="$(cat "$d/carrier" 2>/dev/null)"
+    conn=false
+    if [ "$oper" = up ] || { [ "$oper" = unknown ] && [ "$carrier" = 1 ]; }; then conn=true; fi
+    mac="$(cat "$d/address" 2>/dev/null)"
+    [ "$mac" = "00:00:00:00:00:00" ] && mac=""
+    speed="$(cat "$d/speed" 2>/dev/null)"
+    if [ "$conn" = true ] && [ "${speed:-0}" -gt 0 ] 2>/dev/null; then speed=$((speed * 1000000)); else speed=0; fi
+    ips=""
+    if command -v ip >/dev/null 2>&1; then
+      ips=$(ip -o addr show dev "$n" scope global 2>/dev/null | awk '{split($4,a,"/"); printf "\"%s\",", a[1]}')
+    fi
+    rx="$(cat "$d/statistics/rx_bytes" 2>/dev/null || echo 0)"; tx="$(cat "$d/statistics/tx_bytes" 2>/dev/null || echo 0)"
+    all_rx=$((all_rx + rx)); all_tx=$((all_tx + tx))
+    if [ -e "$d/device" ] && [ "$kind" != vpn ]; then hw_rx=$((hw_rx + rx)); hw_tx=$((hw_tx + tx)); hw=$((hw + 1)); fi
+    out+="{\"name\":\"$(jesc "$n")\",\"make\":\"$(jesc "$make")\",\"model\":\"$(jesc "$model")\",\"kind\":\"$kind\",\"connected\":$conn,\"mac\":\"$(jesc "$mac")\",\"speed\":$speed,\"ips\":[${ips%,}]},"
+  done
+  # traffic = physical interfaces (VPN traffic would otherwise be counted twice); fall back to all
+  if [ "$hw" -gt 0 ]; then all_rx=$hw_rx; all_tx=$hw_tx; fi
+  printf '"net_ifaces":[%s],"net_rx":%s,"net_tx":%s' "${out%,}" "$all_rx" "$all_tx"
+}
+
 checkin_body() {
   local f="$1"
   local mem_total mem_avail mem_pct os_name os_ver cpu_model cores ips disks users btime
@@ -79,7 +139,7 @@ checkin_body() {
 "logged_user":"$(jesc "$users")","os_name":"$(jesc "$os_name")","os_version":"$(jesc "$os_ver")","arch":"$(uname -m)",
 "cpu_model":"$(jesc "$cpu_model")","cpu_cores":${cores:-1},"ram_total":$(( ${mem_total:-0} * 1024 )),
 "manufacturer":"$(jesc "$vendor")","model":"$(jesc "$model")","serial":"$(jesc "$serial")",
-"boot_time":${btime:-0},"agent_version":"$MY_VERSION"}
+"boot_time":${btime:-0},"agent_version":"$MY_VERSION",$(net_info)}
 EOF
 }
 

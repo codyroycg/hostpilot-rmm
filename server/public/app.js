@@ -115,12 +115,29 @@ function confirmDialog(message, { okLabel = 'Confirm', danger = false } = {}) {
 }
 
 // ---------------- chart ----------------
-function chart(rows, series, { hours = 24 } = {}) {
+// network speeds are shown in bits per second, like link speeds
+function fmtBits(bps) {
+  if (bps == null || isNaN(bps)) return '—';
+  const u = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps'];
+  let i = 0; bps = Number(bps);
+  while (bps >= 1000 && i < u.length - 1) { bps /= 1000; i++; }
+  return `${bps.toFixed(bps >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
+}
+const niceCeil = (v) => { const p = 10 ** Math.floor(Math.log10(v)); return [1, 2, 5, 10].map((m) => m * p).find((n) => n >= v); };
+
+/** rows: [{ts, key: value}]; percent series by default, or { rate: true } for bytes/second (auto-scaled). */
+function chart(rows, series, { hours = 24, rate = false } = {}) {
   const W = 600, H = 160;
   const end = Date.now(), start = end - hours * 3600000;
   const x = (ts) => ((ts - start) / (end - start)) * W;
-  const y = (v) => H - (Math.max(0, Math.min(100, v)) / 100) * H;
-  const grid = [25, 50, 75].map((g) => `<line class="grid-line" x1="0" x2="${W}" y1="${y(g)}" y2="${y(g)}"/>`).join('');
+  let top = 100, scaleNote = '';
+  if (rate) {
+    const peak = Math.max(0, ...rows.flatMap((r) => series.map(([k]) => r[k] || 0)));
+    top = niceCeil(Math.max(peak * 8, 8000)) / 8; // chart in bits, scale to a round number of bits/s
+    scaleNote = `<span class="muted">scale 0 – ${fmtBits(top * 8)} · peak ${fmtBits(peak * 8)}</span>`;
+  }
+  const y = (v) => H - (Math.max(0, Math.min(top, v)) / top) * H;
+  const grid = [0.25, 0.5, 0.75].map((g) => `<line class="grid-line" x1="0" x2="${W}" y1="${y(g * top)}" y2="${y(g * top)}"/>`).join('');
   const gapMs = hours < 1 ? 10000 : Math.max(5 * 60000, (hours * 3600000) / 150);
   const paths = series.map(([key, , color]) => {
     let d = '', prev = null;
@@ -131,7 +148,7 @@ function chart(rows, series, { hours = 24 } = {}) {
     }
     return `<path d="${d}" stroke="${color}"/>`;
   }).join('');
-  const legend = series.map(([, label, color]) => `<span><i style="background:${color}"></i>${label}</span>`).join('');
+  const legend = series.map(([, label, color]) => `<span><i style="background:${color}"></i>${label}</span>`).join('') + scaleNote;
   const t = (ms) => new Date(ms).toLocaleString([], hours > 48 ? { month: 'short', day: 'numeric' }
     : hours < 1 ? { hour: '2-digit', minute: '2-digit', second: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
   return `<div class="legend">${legend}</div>
@@ -397,44 +414,73 @@ async function devOverview(el, a) {
     <div class="card"><h3>Utilization</h3>
       <dl class="kv">${kv('CPU', meter(a.cpu_pct))}${kv('Memory', meter(a.mem_pct))}
       ${(a.disks || []).map((d) => kv(esc(d.mount), `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`)).join('')}</dl></div>
-    <div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">Performance</h3>
-      <select id="m-hours" style="width:auto"><option value="live">1 minute (live)</option><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select></div>
-      <div id="m-chart" class="muted">Loading…</div></div>
+    ${chartCard('perf', 'Performance')}
+    ${chartCard('net', 'Network traffic')}
+    <div class="card" style="grid-column:1/-1"><h3>Network interfaces</h3>${ifaceTable(a.net_ifaces)}</div>
     ${a.notes ? `<div class="card"><h3>Notes</h3><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>` : ''}
   </div>`;
-  const SERIES = [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']];
+  const perf = chartPanel(a, 'perf', [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']]);
+  const net = chartPanel(a, 'net', [['net_rx', 'Download', 'var(--c4)'], ['net_tx', 'Upload', 'var(--c5)']], { rate: true });
+  await Promise.all([perf(), net()]);
+}
+
+const chartCard = (id, title) => `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">${title}</h3>
+  <select id="${id}-range" style="width:auto"><option value="live">1 minute (live)</option><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select></div>
+  <div id="${id}-chart" class="muted">Loading…</div></div>`;
+
+/** Wires a chartCard: history from /metrics, or live 2-second samples (shared device sampler) for "1 minute". */
+function chartPanel(a, id, series, { rate = false } = {}) {
+  const box = () => $(`#${id}-chart`);
+  const sel = () => $(`#${id}-range`)?.value;
   let liveTimer = null, lastStart = 0;
   const stopLive = () => { clearInterval(liveTimer); liveTimer = null; };
   const drawLive = async () => {
-    if (!document.body.contains($('#m-chart'))) return stopLive(); // navigated away
+    if (!box() || sel() !== 'live') return stopLive(); // navigated away or range changed
     const r = await api('GET', `/api/agents/${a.id}/live`);
     // (re)start the device-side sampler if it isn't running
     if (!r.active && Date.now() - lastStart > 20000) { lastStart = Date.now(); await api('POST', `/api/agents/${a.id}/live`); }
-    $('#m-chart').innerHTML = r.samples.length
-      ? chart(r.samples, SERIES, { hours: 1 / 60 }) + '<div class="small muted">Live · a sample every 2 seconds</div>'
+    const rows = r.samples.filter((s) => series.some(([k]) => s[k] != null));
+    box().innerHTML = rows.length
+      ? chart(rows, series, { hours: 1 / 60, rate }) + '<div class="small muted">Live · a sample every 2 seconds</div>'
       : '<div class="muted">Starting live monitoring on the device… (usually a few seconds)</div>';
   };
-  const drawChart = async () => {
-    const sel = $('#m-hours')?.value;
-    if (!sel) return;
-    if (sel === 'live') {
+  const draw = async () => {
+    const v = sel();
+    if (!v) return;
+    if (v === 'live') {
       if (!liveTimer) {
-        $('#m-chart').innerHTML = '<div class="muted">Starting live monitoring on the device…</div>';
+        box().innerHTML = '<div class="muted">Starting live monitoring on the device…</div>';
         lastStart = Date.now();
-        try { await api('POST', `/api/agents/${a.id}/live`); } catch (e) { $('#m-chart').innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+        try { await api('POST', `/api/agents/${a.id}/live`); } catch (e) { box().innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
         liveTimer = setInterval(guard(drawLive), 2000);
         state.timers.push(liveTimer);
       }
       return drawLive();
     }
     stopLive();
-    const hours = Number(sel);
-    const rows = await api('GET', `/api/agents/${a.id}/metrics?hours=${hours}`);
-    $('#m-chart').innerHTML = rows.length ? chart(rows, SERIES, { hours }) : '<div class="muted">No metrics yet.</div>';
+    const hours = Number(v);
+    const rows = (await api('GET', `/api/agents/${a.id}/metrics?hours=${hours}`)).filter((r) => series.some(([k]) => r[k] != null));
+    box().innerHTML = rows.length ? chart(rows, series, { hours, rate })
+      : `<div class="muted">${rate ? 'No network data yet. It appears after the agent has checked in twice with this version.' : 'No metrics yet.'}</div>`;
   };
-  $('#m-hours').addEventListener('change', guard(drawChart));
-  await drawChart();
-  every(60000, () => { if ($('#m-hours')?.value !== 'live') return drawChart(); });
+  $(`#${id}-range`).addEventListener('change', guard(draw));
+  every(60000, () => { if (sel() !== 'live') return draw(); });
+  return draw;
+}
+
+const IFACE_KIND = { ethernet: 'Ethernet', wifi: 'Wi-Fi', vpn: 'VPN', virtual: 'Virtual', bluetooth: 'Bluetooth', cellular: 'Cellular', other: 'Other' };
+function ifaceTable(list) {
+  if (!list) return '<div class="muted">Not reported yet. The interface list appears after the agent updates itself and checks in.</div>';
+  if (!list.length) return '<div class="muted">No network interfaces reported.</div>';
+  const rows = [...list].sort((x, y) => (y.connected - x.connected) || (x.kind === 'vpn') - (y.kind === 'vpn'));
+  return `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Make</th><th>Model</th><th>Status</th><th>Speed</th><th>MAC</th><th>IP addresses</th></tr></thead><tbody>
+    ${rows.map((i) => `<tr><td><strong>${esc(i.name)}</strong></td><td>${i.kind === 'vpn' ? badge('VPN', 'info') : esc(IFACE_KIND[i.kind] || i.kind)}</td>
+      <td>${esc(i.make) || '<span class="muted">—</span>'}</td><td>${esc(i.model) || '<span class="muted">—</span>'}</td>
+      <td>${i.connected ? badge('Connected', 'ok') : badge('Disconnected', 'muted')}</td>
+      <td class="nowrap">${i.connected && i.speed ? fmtBits(i.speed) : '<span class="muted">—</span>'}</td>
+      <td class="mono small">${esc(i.mac) || '<span class="muted">—</span>'}</td>
+      <td class="mono small">${i.ips.map(esc).join('<br>') || '<span class="muted">—</span>'}</td></tr>`).join('')}
+  </tbody></table></div>`;
 }
 
 function termEntryHtml(j) {

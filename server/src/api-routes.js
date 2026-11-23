@@ -95,9 +95,10 @@ route('POST', '/api/me/password', (ctx) => {
 function presentAgent(a) {
   const disks = a.disks ? JSON.parse(a.disks) : [];
   const diskMax = disks.reduce((m, d) => (d.total > 0 ? Math.max(m, ((d.total - d.free) / d.total) * 100) : m), 0);
-  const { secret_hash, ...rest } = a;
+  const { secret_hash, net_rx_total, net_tx_total, net_ts, ...rest } = a;
   return {
     ...rest,
+    net_ifaces: a.net_ifaces ? JSON.parse(a.net_ifaces) : null,
     ip_addrs: a.ip_addrs ? JSON.parse(a.ip_addrs) : [],
     disks,
     disk_pct: disks.length ? Math.round(diskMax * 10) / 10 : null,
@@ -273,7 +274,7 @@ route('GET', '/api/agents/:id/metrics', (ctx) => {
   need(ctx);
   const hours = clampInt(ctx.query.get('hours'), 1, 24 * 30, 24);
   const since = Date.now() - hours * 3600000;
-  const rows = all('SELECT ts, cpu, mem, disk FROM metrics WHERE agent_id=? AND ts>? ORDER BY ts', ctx.params.id, since);
+  const rows = all('SELECT ts, cpu, mem, disk, net_rx, net_tx FROM metrics WHERE agent_id=? AND ts>? ORDER BY ts', ctx.params.id, since);
   // downsample to <= 300 points
   const step = Math.ceil(rows.length / 300) || 1;
   if (step === 1) return rows;
@@ -281,7 +282,7 @@ route('GET', '/api/agents/:id/metrics', (ctx) => {
   for (let i = 0; i < rows.length; i += step) {
     const chunk = rows.slice(i, i + step);
     const avg = (k) => { const v = chunk.map((r) => r[k]).filter((x) => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
-    out.push({ ts: chunk[chunk.length - 1].ts, cpu: avg('cpu'), mem: avg('mem'), disk: avg('disk') });
+    out.push({ ts: chunk[chunk.length - 1].ts, cpu: avg('cpu'), mem: avg('mem'), disk: avg('disk'), net_rx: avg('net_rx'), net_tx: avg('net_tx') });
   }
   return out;
 });
