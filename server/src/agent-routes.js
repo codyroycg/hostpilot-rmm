@@ -6,11 +6,13 @@ import { route, sendText, clientIp, publicUrl } from './router.js';
 import { get, run, tx, getSettings } from './db.js';
 import { HttpError, uuid, randHex, sha256, safeEqualHex, truncate, clampInt } from './util.js';
 import { addWaiter, claimJobs } from './jobs.js';
-import { evaluateThresholds, resolveAlert } from './alerts.js';
+import { evaluateThresholds, resolveAlert, openAlert } from './alerts.js';
+import { policyServicesFor } from './policies.js';
 import { onJobFinished } from './job-results.js';
 import { checkToken, receiveInto, sendFile } from './transfers.js';
 import { hostInput, hostOutput, hostClose } from './terminal.js';
 import { liveSample } from './live.js';
+import { chatTokenFor, devicePoll, deviceSend } from './chat.js';
 
 const AGENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 
@@ -143,6 +145,17 @@ route('POST', '/api/agent/checkin', (ctx) => {
     }
     Object.assign(fields, { net_rx_total: rxTot, net_tx_total: txTot, net_ts: now });
   }
+  // per-core CPU, machine class, watched services
+  if (Array.isArray(b.core_load)) fields.core_load = JSON.stringify(b.core_load.slice(0, 512).map((v) => Math.max(0, Math.min(100, Math.round(num(v) || 0)))));
+  if (b.chassis !== undefined || b.is_virtual !== undefined) {
+    fields.device_class = deviceClass({ chassis: Array.isArray(b.chassis) ? b.chassis.map(Number) : [], virtual: b.is_virtual === true || b.is_virtual === 'true',
+      pcType: num(b.pc_type), platform: a.platform, os: fields.os_name || a.os_name || '' });
+  }
+  let services = null;
+  if (Array.isArray(b.services)) {
+    services = b.services.slice(0, 100).map((s) => ({ name: str(s?.name, 100) || '', display: str(s?.display, 200) || '', status: str(s?.status, 20) || 'unknown', start: str(s?.start, 30) || '' }));
+    fields.services = JSON.stringify(services);
+  }
   const keys = Object.keys(fields).filter((k) => fields[k] !== null);
   if (keys.length) {
     run(`UPDATE agents SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`, ...keys.map((k) => fields[k]), a.id);
@@ -150,9 +163,42 @@ route('POST', '/api/agent/checkin', (ctx) => {
   const diskMax = disks && disks.length
     ? Math.max(...disks.filter((d) => d.total > 0).map((d) => ((d.total - d.free) / d.total) * 100), 0) : null;
   run('INSERT INTO metrics(agent_id, ts, cpu, mem, disk, net_rx, net_tx) VALUES(?,?,?,?,?,?,?)', a.id, now, cpu, mem, diskMax, rxRate, txRate);
-  evaluateThresholds({ ...a, hostname: fields.hostname || a.hostname }, disks);
-  return { ok: true, checkin_seconds: getSettings().checkin_seconds };
+  const named = { ...a, hostname: fields.hostname || a.hostname };
+  evaluateThresholds(named, disks);
+  const watch = watchedServices({ ...a, ...fields });
+  if (services) evaluateServices(named, services, watch);
+  return { ok: true, checkin_seconds: getSettings().checkin_seconds, watch_services: watch };
 });
+
+const LAPTOP = new Set([8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32]);
+const SERVER_CHASSIS = new Set([17, 23, 25, 28, 29]);
+function deviceClass({ chassis, virtual, pcType, platform, os }) {
+  if (virtual) return 'vm';
+  if (/server/i.test(os) || chassis.some((c) => SERVER_CHASSIS.has(c)) || pcType === 4 || pcType === 5) return 'server';
+  if (chassis.some((c) => LAPTOP.has(c)) || pcType === 2) return 'laptop';
+  return platform === 'linux' ? 'server' : 'desktop';
+}
+
+const SERVICE_NAME = /^[\w.@:+-]{1,100}$/;
+/** Services this device should report: global list for its platform + its own extra list + policy rules. */
+export function watchedServices(a) {
+  const s = getSettings();
+  const list = [s[`watch_services_${a.platform === 'windows' ? 'windows' : 'linux'}`], a.watch_services].join(',')
+    .split(/[,\s]+/).map((x) => x.trim()).filter((x) => SERVICE_NAME.test(x));
+  return [...new Set([...list, ...policyServicesFor(a)])].slice(0, 50);
+}
+
+function evaluateServices(agent, services, watch) {
+  const watched = new Set(watch.map((x) => x.toLowerCase()));
+  for (const svc of services) {
+    if (!watched.has(svc.name.toLowerCase())) continue;
+    const type = `service:${svc.name.toLowerCase()}`;
+    const label = svc.display ? `${svc.display} (${svc.name})` : svc.name;
+    if (svc.status === 'running') resolveAlert(agent, type, `${label} is running again`);
+    else if (svc.status === 'missing') openAlert(agent, type, 'warning', `Monitored service ${label} is not installed`);
+    else openAlert(agent, type, 'critical', `Service ${label} is ${svc.status}`);
+  }
+}
 
 route('POST', '/api/agent/inventory', (ctx) => {
   const a = authAgent(ctx);
@@ -207,7 +253,8 @@ route('GET', '/api/agent/poll', async (ctx) => {
   }
   // tray_version '' tells Windows agents to remove the taskbar icon
   const trayVersion = s.tray_icon ? AGENT_FILES['tray.exe'].version : '';
-  return { jobs, want_inventory: wantInv, version, tray_version: trayVersion, checkin_seconds: s.checkin_seconds };
+  return { jobs, want_inventory: wantInv, version, tray_version: trayVersion, checkin_seconds: s.checkin_seconds,
+    chat_token: a.platform === 'windows' ? chatTokenFor(a.id) : undefined };
 });
 
 route('POST', '/api/agent/result', (ctx) => {
@@ -246,6 +293,10 @@ route('GET', '/api/transfer/:id', (ctx) => {
 route('GET', '/api/term/:id/in', (ctx) => hostInput(ctx));
 route('POST', '/api/term/:id/out', (ctx) => hostOutput(ctx), { raw: true });
 route('POST', '/api/term/:id/close', (ctx) => hostClose(ctx), { raw: true });
+
+// Chat from the tray icon (token = this device's chat token; only grants access to its own conversation)
+route('GET', '/api/chat/device/poll', async (ctx) => devicePoll(String(ctx.query.get('token') || ''), clampInt(ctx.query.get('after'), 0, 1e12, 0), clampInt(ctx.query.get('wait'), 0, 30, 0), ctx.res));
+route('POST', '/api/chat/device/send', (ctx) => deviceSend(String(ctx.query.get('token') || ''), ctx.body.author, ctx.body.body));
 
 // Live performance samples (token in the URL identifies the session)
 route('POST', '/api/live/:id', async (ctx) => sendText(ctx.res, 200, await liveSample(ctx)), { raw: true });

@@ -155,7 +155,36 @@ function Get-Metrics {
     $net = $null
     try { $net = Get-NetInfo } catch { Write-Log "network info failed: $($_.Exception.Message)" }
 
+    # per-logical-processor load ("0,0", "0,1", ... = group,core; _Total rows skipped)
+    $coreLoad = @()
+    try {
+        # the formatted counters read 0 on a fresh query; prime them, then read again
+        $null = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction Stop
+        Start-Sleep -Milliseconds 400
+        $coreLoad = @(Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction Stop |
+            Where-Object { $_.Name -notmatch '_Total' } |
+            Sort-Object { $p = $_.Name -split ','; [int]$p[0] * 1000 + [int]$p[-1] } |
+            ForEach-Object { [int]$_.PercentProcessorTime })
+    } catch {}
+    # what kind of machine this is
+    $chassis = @()
+    try { $chassis = @((Get-CimInstance Win32_SystemEnclosure -ErrorAction Stop).ChassisTypes | ForEach-Object { [int]$_ }) } catch {}
+    $virtual = [bool]("$($cs.Manufacturer) $($cs.Model)" -match 'Virtual|VMware|KVM|QEMU|Xen|VirtualBox|Bochs|Parallels|HVM domU|Proxmox')
+    # services the server asked us to watch
+    $svc = @()
+    foreach ($name in @($script:WatchServices)) {
+        if (-not $name) { continue }
+        $s = Get-Service -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($s) { $svc += @{ name = [string]$s.Name; display = [string]$s.DisplayName; status = ([string]$s.Status).ToLower(); start = ([string]$s.StartType).ToLower() } }
+        else { $svc += @{ name = [string]$name; display = ''; status = 'missing'; start = '' } }
+    }
+
     $m = @{
+        core_load     = $coreLoad
+        chassis       = $chassis
+        is_virtual    = $virtual
+        pc_type       = [int]$cs.PCSystemType
+        services      = $svc
         hostname      = [string]$env:COMPUTERNAME
         cpu           = [double]$cpu
         mem           = [double]$memPct
@@ -426,6 +455,7 @@ function Update-Forced([string]$Reason, $JobId = $null) {
 # HKLM\SOFTWARE\HostPilot is readable by every user; the tray icon (HostPilotTray.exe) shows it.
 
 $IsSystem = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+$script:WatchServices = @()
 $StatusKey = 'HKLM:\SOFTWARE\HostPilot'
 $script:LastContact = 0
 
@@ -436,6 +466,8 @@ function Set-AgentStatus([string]$State, [string]$Message = '') {
         if ($State -eq 'connected') { $script:LastContact = $now }
         if (-not (Test-Path $StatusKey)) { New-Item -Path $StatusKey -Force | Out-Null }
         $vals = @{ State = $State; Message = $Message; Heartbeat = [string]$now; LastContact = [string]$script:LastContact; Server = $Server; Version = $MyVersion }
+        # lets the tray icon (running as the signed-in user) open this device's chat with technicians
+        if ($script:ChatToken) { $vals.ChatToken = $script:ChatToken }
         foreach ($k in $vals.Keys) { Set-ItemProperty -Path $StatusKey -Name $k -Value $vals[$k] -Type String }
     } catch {}
 }
@@ -521,6 +553,7 @@ while ($true) {
             $resp = Invoke-Api POST '/api/agent/checkin' (Get-Metrics) 30
             $lastCheckin = Get-Date
             if ($resp.checkin_seconds) { $interval = [Math]::Max(15, [int]$resp.checkin_seconds) }
+            if ($null -ne $resp.watch_services) { $script:WatchServices = @($resp.watch_services) }
         }
 
         if ($Running.Count -gt 0) { $wait = 2 }
@@ -534,6 +567,7 @@ while ($true) {
         Update-Jobs
         if ($poll.want_inventory) { Send-Inventory }
         $failures = 0
+        if ($poll.chat_token) { $script:ChatToken = [string]$poll.chat_token }
         Set-AgentStatus 'connected'
         if ($null -ne $poll.tray_version) {
             $script:TrayVersion = [string]$poll.tray_version

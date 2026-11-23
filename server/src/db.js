@@ -108,7 +108,24 @@ CREATE TABLE IF NOT EXISTS net_devices(
   ip TEXT, mac TEXT, hostname TEXT, name TEXT, vendor TEXT, type TEXT, reason TEXT, type_manual INTEGER DEFAULT 0, ports TEXT, info TEXT,
   agent_id TEXT, online INTEGER DEFAULT 1, first_seen INTEGER, last_seen INTEGER, UNIQUE(network_id, dkey));
 `);
-addColumn('users', 'dashboard', 'TEXT');         // JSON dashboard layout [{id, span}] (null = default)
+db.exec(`
+CREATE TABLE IF NOT EXISTS policies(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', enabled INTEGER DEFAULT 1, enforce INTEGER DEFAULT 0,
+  interval_hours INTEGER DEFAULT 24, target TEXT NOT NULL, rules TEXT NOT NULL, last_run INTEGER, created_by TEXT, created_at INTEGER, updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS policy_results(
+  policy_id INTEGER NOT NULL REFERENCES policies(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  rule_key TEXT NOT NULL, status TEXT, detail TEXT, checked_at INTEGER, job_id TEXT, PRIMARY KEY(policy_id, agent_id, rule_key));
+CREATE TABLE IF NOT EXISTS chat_messages(
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, direction TEXT NOT NULL,
+  author TEXT, body TEXT NOT NULL, created_at INTEGER, read_at INTEGER);
+CREATE INDEX IF NOT EXISTS chat_idx ON chat_messages(agent_id, id);
+`);
+addColumn('agents', 'chat_token', 'TEXT');
+addColumn('users', 'dashboard', 'TEXT');
+addColumn('agents', 'core_load', 'TEXT');        // JSON [% per logical CPU]
+addColumn('agents', 'device_class', 'TEXT');     // desktop | laptop | server | vm
+addColumn('agents', 'services', 'TEXT');         // JSON status of watched services
+addColumn('agents', 'watch_services', 'TEXT');   // extra services to watch on this device (comma separated)         // JSON dashboard layout [{id, span}] (null = default)
 addColumn('agents', 'net_ifaces', 'TEXT');        // JSON list of network interfaces
 addColumn('agents', 'net_rx_total', 'INTEGER');   // last byte counters, to turn into rates
 addColumn('agents', 'net_tx_total', 'INTEGER');
@@ -146,6 +163,8 @@ export const SETTING_DEFAULTS = {
   webhook_url: '',
   update_scan_hours: 24,
   tray_icon: 1, // 1 = show the HostPilot status icon in the Windows taskbar
+  watch_services_windows: '', // services monitored on every Windows device (comma separated)
+  watch_services_linux: '',
 };
 
 export function getSettings() {

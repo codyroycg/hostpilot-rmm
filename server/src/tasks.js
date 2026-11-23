@@ -2,6 +2,7 @@ import { all, run, getSettings } from './db.js';
 import { queueJobs, isPolling } from './jobs.js';
 import { openAlert } from './alerts.js';
 import { buildTask } from './task-catalog.js';
+import { policyTargets, buildPolicyScript } from './policies.js';
 
 // Periodically scan online devices for OS updates (a few at a time).
 function autoUpdateScan() {
@@ -28,6 +29,27 @@ async function networkScans() {
     const j = n.last_job_id ? all('SELECT status, created_at FROM jobs WHERE id=?', n.last_job_id)[0] : null;
     if (j && (['queued', 'running'].includes(j.status) || t - j.created_at < 3600000)) continue; // running, or failed less than an hour ago
     try { queueNetworkScan(n, 'scheduler'); } catch (e) { console.error('[netscan]', n.name, e.message); }
+  }
+}
+
+// Run enabled policies on their interval (one job per targeted device; skip devices that already have one queued).
+export function runPolicy(p, createdBy, onlyAgents = null) {
+  let agents = policyTargets(p);
+  if (onlyAgents) agents = agents.filter((a) => onlyAgents.includes(a.id));
+  const pending = new Set(all("SELECT agent_id FROM jobs WHERE task='policy.run' AND status IN ('queued','running') AND name=?", `Policy: ${p.name}`).map((r) => r.agent_id));
+  const r = queueJobs({
+    agents: agents.filter((a) => !pending.has(a.id)), name: `Policy: ${p.name}`, task: 'policy.run', timeout: 900, createdBy,
+    build: (a) => buildPolicyScript(p, a.platform),
+  });
+  run('UPDATE policies SET last_run=? WHERE id=?', Date.now(), p.id);
+  return r;
+}
+function runPolicies() {
+  const t = Date.now();
+  for (const p of all('SELECT * FROM policies WHERE enabled=1')) {
+    if (p.last_run && t - p.last_run < p.interval_hours * 3600000) continue;
+    const r = runPolicy(p, 'scheduler');
+    console.log(`[policy] "${p.name}" queued on ${r.created} device(s)`);
   }
 }
 
@@ -101,6 +123,8 @@ export function startBackgroundTasks() {
   setInterval(safe('expire', expireJobs), 60_000);
   setInterval(safe('prune', prune), 3600_000);
   setInterval(safe('update-scan', autoUpdateScan), 5 * 60_000);
+  setInterval(safe('policies', runPolicies), 5 * 60_000);
+  setTimeout(safe('policies', runPolicies), 60_000);
   setInterval(() => networkScans().catch((e) => console.error('[task:netscan]', e)), 10 * 60_000);
   setTimeout(safe('update-scan', autoUpdateScan), 90_000);
   setTimeout(safe('prune', prune), 10_000);

@@ -7,6 +7,9 @@ import { createRemoteSession } from './remote.js';
 import { createTerminalSession } from './terminal.js';
 import { startLive, readLive } from './live.js';
 import { normalizeCidr, presentNetDevice, NET_TYPES } from './netmap.js';
+import { ruleCatalog, cleanPolicy, policyTargets } from './policies.js';
+import { runPolicy } from './tasks.js';
+import { techSend, techRead, conversations, unreadSummary } from './chat.js';
 import { getTask, buildTask, baseName } from './task-catalog.js';
 import { createTransfer, getTransfer, receiveInto, sendFile, removeTransfer } from './transfers.js';
 
@@ -116,9 +119,13 @@ route('POST', '/api/me/password', (ctx) => {
 function presentAgent(a) {
   const disks = a.disks ? JSON.parse(a.disks) : [];
   const diskMax = disks.reduce((m, d) => (d.total > 0 ? Math.max(m, ((d.total - d.free) / d.total) * 100) : m), 0);
-  const { secret_hash, net_rx_total, net_tx_total, net_ts, ...rest } = a;
+  const { secret_hash, net_rx_total, net_tx_total, net_ts, chat_token, ...rest } = a;
+  const json = (v, d) => { try { return v ? JSON.parse(v) : d; } catch { return d; } };
   return {
     ...rest,
+    core_load: json(a.core_load, null),
+    services: json(a.services, []),
+    device_class: a.device_class || (a.platform === 'linux' || /server/i.test(a.os_name || '') ? 'server' : 'desktop'),
     net_ifaces: a.net_ifaces ? JSON.parse(a.net_ifaces) : null,
     ip_addrs: a.ip_addrs ? JSON.parse(a.ip_addrs) : [],
     disks,
@@ -250,6 +257,13 @@ route('GET', '/api/dashboard', (ctx) => {
     agents: { current: agents.length - outdated.length, outdated: outdated.length, offline: count(agents, (a) => !a.online) },
     servers, workstations,
     net_devices: all('SELECT type, COUNT(*) AS n, SUM(online) AS online FROM net_devices GROUP BY type'),
+    device_classes: ['desktop', 'laptop', 'server', 'vm'].map((c) => ({ class: c, n: count(agents, (a) => a.device_class === c), online: count(agents, (a) => a.device_class === c && a.online) })),
+    compliance: (() => {
+      const pols = all('SELECT * FROM policies WHERE enabled=1');
+      const s = { policies: pols.length, compliant: 0, non_compliant: 0, not_checked: 0 };
+      for (const p of pols) { const c = policyCompliance(p); s.compliant += c.compliant; s.non_compliant += c.non_compliant; s.not_checked += c.not_checked; }
+      return s;
+    })(),
     networks: get('SELECT COUNT(*) AS n FROM networks').n,
     problem_devices: count(agents, (a) => worst.has(a.id) || !a.online),
     health: {
@@ -370,6 +384,18 @@ route('PUT', '/api/agents/:id', (ctx) => {
   run('UPDATE agents SET client_id=?, notes=?, maintenance=? WHERE id=?', clientId,
     b.notes === undefined ? a.notes : String(b.notes), b.maintenance === undefined ? a.maintenance : (b.maintenance ? 1 : 0), a.id);
   if (b.maintenance) run("UPDATE alerts SET status='resolved', resolved_at=? WHERE agent_id=? AND status IN ('open','ack')", Date.now(), a.id);
+  if (b.watch_services !== undefined) {
+    const list = String(b.watch_services || '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+    if (list.some((x) => !/^[\w.@:+-]{1,100}$/.test(x))) throw new HttpError(400, 'Service names may only contain letters, digits and . _ - @ : +');
+    run('UPDATE agents SET watch_services=? WHERE id=?', list.join(','), a.id);
+    // stop alerting for services that are no longer watched
+    for (const al of all("SELECT id, type FROM alerts WHERE agent_id=? AND type LIKE 'service:%' AND status IN ('open','ack')", a.id)) {
+      const name = al.type.slice(8);
+      const s = getSettings();
+      const global = String(s[`watch_services_${a.platform === 'windows' ? 'windows' : 'linux'}`] || '').toLowerCase().split(/[,\s]+/);
+      if (!list.map((x) => x.toLowerCase()).includes(name) && !global.includes(name)) run("UPDATE alerts SET status='resolved', resolved_at=? WHERE id=?", Date.now(), al.id);
+    }
+  }
   audit(u.username, 'device.update', a.hostname);
   return { ok: true };
 });
@@ -836,6 +862,116 @@ route('POST', '/api/agents/update-agent', (ctx) => {
   return queueAgentUpdate(u, agents);
 });
 
+// ---------- chat with the signed-in user (Windows tray icon) ----------
+
+route('GET', '/api/agents/:id/chat', async (ctx) => {
+  need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  const msgs = await techRead(a.id, clampInt(ctx.query.get('after'), 0, 1e12, 0), clampInt(ctx.query.get('wait'), 0, 25, 0), ctx.res);
+  return { messages: msgs, supported: a.platform === 'windows', tray: !!getSettings().tray_icon, logged_user: a.logged_user };
+});
+route('POST', '/api/agents/:id/chat', (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  if (a.platform !== 'windows') throw new HttpError(400, 'Chat needs the Windows tray icon');
+  const m = techSend(a, u, ctx.body.body);
+  audit(u.username, 'chat.send', a.hostname);
+  return m;
+});
+route('GET', '/api/chat/conversations', (ctx) => { need(ctx, 'tech'); return conversations(); });
+route('GET', '/api/chat/unread', (ctx) => { need(ctx); return unreadSummary(); });
+
+// ---------- policies (configuration baselines) ----------
+
+function policyCompliance(p) {
+  const targets = policyTargets(p);
+  const ids = new Set(targets.map((a) => a.id));
+  const rows = all('SELECT agent_id, status, checked_at FROM policy_results WHERE policy_id=?', p.id).filter((r) => ids.has(r.agent_id));
+  const per = new Map();
+  for (const r of rows) {
+    const s = per.get(r.agent_id) || { bad: false, fixed: false, at: 0 };
+    if (r.status === 'fail' || r.status === 'error') s.bad = true;
+    if (r.status === 'fixed') s.fixed = true;
+    s.at = Math.max(s.at, r.checked_at);
+    per.set(r.agent_id, s);
+  }
+  const compliant = [...per.values()].filter((s) => !s.bad).length;
+  return { targets: targets.length, checked: per.size, compliant, non_compliant: per.size - compliant, not_checked: targets.length - per.size,
+    fixed: [...per.values()].filter((s) => s.fixed).length };
+}
+const presentPolicy = (p) => ({ ...p, enabled: !!p.enabled, enforce: !!p.enforce, target: JSON.parse(p.target), rules: JSON.parse(p.rules) });
+const loadPolicy = (id) => { const p = get('SELECT * FROM policies WHERE id=?', Number(id)); if (!p) throw new HttpError(404, 'Policy not found'); return p; };
+
+route('GET', '/api/policy-rules', (ctx) => { need(ctx); return ruleCatalog(); });
+
+route('GET', '/api/policies', (ctx) => {
+  need(ctx);
+  return all('SELECT * FROM policies ORDER BY name COLLATE NOCASE').map((p) => ({ ...presentPolicy(p), compliance: policyCompliance(p) }));
+});
+
+route('GET', '/api/policies/:id', (ctx) => {
+  need(ctx);
+  const p = loadPolicy(ctx.params.id);
+  const targets = policyTargets(p);
+  const names = new Map(all('SELECT id, hostname, platform, last_seen, device_class FROM agents').map((a) => [a.id, a]));
+  const results = all('SELECT agent_id, rule_key, status, detail, checked_at FROM policy_results WHERE policy_id=?', p.id);
+  return {
+    ...presentPolicy(p), compliance: policyCompliance(p),
+    devices: targets.map((a) => ({ ...names.get(a.id), id: a.id, results: results.filter((r) => r.agent_id === a.id) })),
+  };
+});
+
+route('POST', '/api/policies', (ctx) => {
+  const u = need(ctx, 'admin');
+  const v = cleanPolicy(ctx.body);
+  const t = Date.now();
+  const r = run(`INSERT INTO policies(name, description, enabled, enforce, interval_hours, target, rules, created_by, created_at, updated_at)
+                 VALUES(?,?,?,?,?,?,?,?,?,?)`, v.name, v.description, v.enabled, v.enforce, v.interval_hours, JSON.stringify(v.target), JSON.stringify(v.rules), u.username, t, t);
+  const p = loadPolicy(r.lastInsertRowid);
+  audit(u.username, 'policy.create', `${p.name}${v.enforce ? ' (enforced)' : ''}`);
+  if (v.enabled && ctx.body.run_now !== false) runPolicy(p, u.username);
+  return presentPolicy(p);
+});
+
+route('PUT', '/api/policies/:id', (ctx) => {
+  const u = need(ctx, 'admin');
+  const old = loadPolicy(ctx.params.id);
+  const v = cleanPolicy(ctx.body);
+  run(`UPDATE policies SET name=?, description=?, enabled=?, enforce=?, interval_hours=?, target=?, rules=?, updated_at=? WHERE id=?`,
+    v.name, v.description, v.enabled, v.enforce, v.interval_hours, JSON.stringify(v.target), JSON.stringify(v.rules), Date.now(), old.id);
+  // results for rules that no longer exist would be misleading
+  const keys = new Set(v.rules.map((r) => r.key));
+  for (const r of all('SELECT DISTINCT rule_key FROM policy_results WHERE policy_id=?', old.id)) if (!keys.has(r.rule_key)) run('DELETE FROM policy_results WHERE policy_id=? AND rule_key=?', old.id, r.rule_key);
+  audit(u.username, 'policy.update', `${v.name}${v.enforce ? ' (enforced)' : ''}`);
+  const p = loadPolicy(old.id);
+  if (v.enabled && ctx.body.run_now) runPolicy(p, u.username);
+  return presentPolicy(p);
+});
+
+route('DELETE', '/api/policies/:id', (ctx) => {
+  const u = need(ctx, 'admin');
+  const p = loadPolicy(ctx.params.id);
+  run('DELETE FROM policies WHERE id=?', p.id);
+  audit(u.username, 'policy.delete', p.name);
+  return { ok: true };
+});
+
+route('POST', '/api/policies/:id/run', (ctx) => {
+  const u = need(ctx, 'tech');
+  const p = loadPolicy(ctx.params.id);
+  const r = runPolicy(p, u.username, ctx.body.agent_id ? [String(ctx.body.agent_id)] : null);
+  audit(u.username, 'policy.run', `${p.name} on ${r.created} device(s)`);
+  return r;
+});
+
+route('GET', '/api/agents/:id/compliance', (ctx) => {
+  need(ctx);
+  const a = loadAgent(ctx.params.id);
+  return all('SELECT * FROM policies ORDER BY name COLLATE NOCASE').filter((p) => policyTargets(p).some((x) => x.id === a.id)).map((p) => ({
+    ...presentPolicy(p), results: all('SELECT rule_key, status, detail, checked_at FROM policy_results WHERE policy_id=? AND agent_id=?', p.id, a.id),
+  }));
+});
+
 // ---------- network discovery & topology ----------
 
 export function queueNetworkScan(n, createdBy) {
@@ -974,8 +1110,8 @@ route('GET', '/api/agents/:id/live', (ctx) => { need(ctx); return readLive(ctx.p
 route('POST', '/api/agents/:id/terminal', (ctx) => {
   const u = need(ctx, 'tech');
   const a = loadAgent(ctx.params.id);
-  if (a.platform !== 'linux') throw new HttpError(400, 'Terminal sessions are available for Linux devices');
-  return createTerminalSession({ id: a.id, hostname: a.hostname, platform: a.platform }, u);
+  const shell = a.platform === 'windows' ? (ctx.body.shell === 'cmd' ? 'cmd' : 'powershell') : 'bash';
+  return createTerminalSession({ id: a.id, hostname: a.hostname, platform: a.platform }, u, shell);
 });
 
 // Bootstrap the first admin account.

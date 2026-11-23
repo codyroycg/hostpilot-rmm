@@ -14,6 +14,6 @@ Write-Host "Built $((Resolve-Path $out).Path)"
 # Tray icon: runs as the logged-in user (asInvoker); /target:winexe so no console window appears.
 $out = Join-Path $here '..\server\agents\HostPilotTray.exe'
 & $csc /nologo /target:winexe /optimize+ /platform:anycpu "/win32manifest:$here\tray.manifest" `
-    /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/out:$out" "$here\HostPilotTray.cs"
+    /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll "/out:$out" "$here\HostPilotTray.cs"
 if ($LASTEXITCODE) { throw "csc failed ($LASTEXITCODE)" }
 Write-Host "Built $((Resolve-Path $out).Path)"

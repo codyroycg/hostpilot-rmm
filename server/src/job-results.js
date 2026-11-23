@@ -2,6 +2,7 @@
 import { get, run, tx } from './db.js';
 import { notifyJobDone } from './jobs.js';
 import { ingestScan } from './netmap.js';
+import { ingestPolicyResult } from './policies.js';
 
 function parseUpdates(agentId, stdout) {
   const updates = [];
@@ -36,5 +37,6 @@ export function onJobFinished(jobId) {
   if (/^software\.(install|uninstall|reinstall)$/.test(j.task || '')) run('UPDATE agents SET want_inventory=1 WHERE id=?', j.agent_id);
   if (j.task === 'updates.install') run('UPDATE agents SET want_inventory=1 WHERE id=?', j.agent_id);
   if (j.task === 'net.scan') { try { ingestScan(j); } catch (e) { console.error('[netscan]', e); } }
+  if (j.task === 'policy.run') { try { ingestPolicyResult(j); } catch (e) { console.error('[policy]', e); } }
   notifyJobDone(j.id);
 }

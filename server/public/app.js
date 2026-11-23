@@ -158,8 +158,8 @@ function chart(rows, series, { hours = 24, rate = false } = {}) {
 
 // ---------------- layout & routing ----------------
 const NAV = [
-  ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/alerts', 'Alerts', 'alerts'],
-  null, ['#/patching', 'Patching'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
+  ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/alerts', 'Alerts', 'alerts'], ['#/messages', 'Messages', 'chat'],
+  null, ['#/patching', 'Patching'], ['#/policies', 'Policies'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
   null, ['#/settings', 'Settings'],
 ];
 
@@ -167,7 +167,7 @@ function renderShell() {
   $('#root').innerHTML = `<div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand"><img src="/favicon.svg" alt="">HostPilot RMM</div>
-      <nav class="nav">${NAV.map((n) => (n ? `<a href="${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? '<span class="badge hidden" id="nav-alerts"></span>' : ''}</a>` : '<div class="sep"></div>')).join('')}</nav>
+      <nav class="nav">${NAV.map((n) => (n ? `<a href="${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? `<span class="badge hidden" id="nav-${n[2]}"></span>` : ''}</a>` : '<div class="sep"></div>')).join('')}</nav>
     </aside>
     <div class="sidebar-scrim" data-action="toggle-menu"></div>
     <div class="main">
@@ -205,6 +205,11 @@ const ROUTES = [
   [/^#\/alerts$/, pageAlerts, 'Alerts'],
   [/^#\/software$/, pageSoftware, 'Software'],
   [/^#\/network$/, pageNetworks, 'Network'],
+  [/^#\/messages$/, pageMessages, 'Messages'],
+  [/^#\/policies$/, pagePolicies, 'Policies'],
+  [/^#\/policies\/(new)$/, pagePolicyEdit, 'New policy'],
+  [/^#\/policies\/(\d+)\/edit$/, pagePolicyEdit, 'Edit policy'],
+  [/^#\/policies\/(\d+)$/, pagePolicy, 'Policy'],
   [/^#\/network\/(\d+)(?:\/(\w+))?$/, pageNetwork, 'Network'],
   [/^#\/settings$/, pageSettings, 'Settings'],
 ];
@@ -350,8 +355,17 @@ const DASH_WIDGETS = [
   { id: 'server-status', group: 'Charts', title: 'Server status', span: 1, render: (c) => widget('Server status', 'All clients', groupBars(c.sv)) },
   { id: 'problem-workstations', group: 'Charts', title: 'Problem workstations', span: 1, render: (c) => widget('Problem workstations', 'With one or more active alerts', groupDonut(c.ws)) },
   { id: 'workstation-status', group: 'Charts', title: 'Workstation status', span: 1, render: (c) => widget('Workstation status', 'All clients', groupBars(c.ws)) },
-  { id: 'device-types', group: 'Charts', title: 'Device types', span: 1, render: (c) => widget('Device types', 'All clients', `<div class="wsplit">${wDonut([[c.sv.total, WC.blue, 'Servers'], [c.ws.total, WC.pink, 'Workstations']], c.t.devices)}
-      ${wLegend([[c.sv.total, WC.blue, 'Servers'], [c.ws.total, WC.pink, 'Workstations'], [c.t.maintenance, WC.amber, 'Maintenance']])}</div>`) },
+  { id: 'device-types', group: 'Charts', title: 'Device types', span: 1, render: (c) => {
+    const parts = (c.d.device_classes || []).map((x) => [x.n, CLASS_INFO[x.class][1], `${CLASS_INFO[x.class][0]}s`.replace('Virtual machines', 'Virtual machines').replace(/machines?s$/, 'machines')]);
+    return widget('Device types', 'Desktops, laptops, servers and VMs', `<div class="wsplit">${wDonut(parts, c.t.devices)}${wLegend(parts)}</div>`);
+  } },
+  { id: 'compliance', group: 'Charts', title: 'Policy compliance', span: 1, render: (c) => {
+    const s = c.d.compliance || { policies: 0 };
+    const parts = [[s.compliant || 0, WC.green, 'Compliant', '#/policies'], [s.non_compliant || 0, WC.red, 'Not compliant', '#/policies'], [s.not_checked || 0, WC.gray, 'Not checked', '#/policies']];
+    return widget('Policy compliance', `${plural(s.policies, 'enabled policy').replace('policys', 'policies')} · device checks`, s.policies
+      ? `<div class="wsplit">${wDonut(parts, `${(s.compliant + s.non_compliant) ? Math.round((s.compliant / (s.compliant + s.non_compliant)) * 100) : 0}%`)}${wLegend(parts)}</div>`
+      : '<div class="small muted">No policies yet. <a href="#/policies">Create one →</a></div>', { href: '#/policies' });
+  } },
   { id: 'devices-os', group: 'Charts', title: 'Devices by OS', span: 1, render: (c) => widget('Devices by OS', 'All clients', `<div class="wsplit">${wDonut(c.osParts, c.t.devices)}${wLegend(c.osParts.map(([v, col, l]) => [v, col, l.length > 26 ? `${l.slice(0, 25)}…` : l]))}</div>`) },
   { id: 'reboot-time', group: 'Charts', title: 'Last reboot time', span: 2, render: (c) => widget('Last reboot time', 'Online devices', `<div class="wsplit wide">${wHBars(c.reboot)}${wLegend(c.reboot)}</div>`) },
   { id: 'patch-status', group: 'Charts', title: 'Patch status', span: 1, render: (c) => widget('Patch status', 'All devices', `<div class="wsplit">${wBars(c.patchParts)}${wLegend(c.patchParts.map(([v, col, l]) => [v, col, l, '#/patching']))}</div>`, { href: '#/patching' }) },
@@ -743,6 +757,412 @@ function netDeviceModal(d, onSaved) {
   }));
 }
 
+// ---------------- device class, per-core CPU ----------------
+const CLASS_INFO = { desktop: ['Desktop', WC.pink], laptop: ['Laptop', WC.purple], server: ['Server', WC.blue], vm: ['Virtual machine', WC.teal] };
+const classBadge = (c) => { const [l, col] = CLASS_INFO[c] || CLASS_INFO.desktop; return `<span class="badge" style="color:${col};border-color:${col}55">${l}</span>`; };
+function coreGrid(loads) {
+  const color = (v) => (v >= 90 ? 'var(--bad)' : v >= 70 ? 'var(--warn)' : 'var(--ok)');
+  return `<div class="cores">${loads.map((v, i) => `<div class="core" title="CPU ${i}: ${v}%"><div class="core-bar"><span style="height:${Math.max(2, v)}%;background:${color(v)}"></span></div><div class="core-n">${v}</div></div>`).join('')}</div>`;
+}
+
+// ---------------- task manager: processes & services ----------------
+async function devTaskManager(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">The task manager requires the tech role.</div>'; return; }
+  let view = 'proc', procs = [], svcs = [], sort = 'cpu', q = '', svcFilter = '';
+  el.innerHTML = `<div class="toolbar"><div class="seg"><button class="btn sm" data-v="proc">Processes</button><button class="btn sm" data-v="svc">Services</button></div>
+      <input type="search" id="tm-q" placeholder="Filter…"><select id="tm-sf" class="hidden"><option value="">All services</option><option value="running">Running</option><option value="stopped">Stopped</option><option value="auto-stopped">Automatic but stopped</option></select>
+      <span class="grow"></span><span class="small muted" id="tm-status"></span><button class="btn sm" id="tm-refresh">Refresh</button></div>
+    <div class="card flush"><div class="table-wrap" id="tm-body"><div class="empty muted" style="padding:28px;text-align:center">Loading…</div></div></div>
+    <p class="small muted">Runs in the background as ${isWin(a) ? 'SYSTEM' : 'root'}; the signed-in user isn't interrupted. CPU is measured over one second.</p>`;
+  const status = (t) => { $('#tm-status').textContent = t; };
+  const draw = () => {
+    el.querySelectorAll('[data-v]').forEach((b) => b.classList.toggle('primary', b.dataset.v === view));
+    $('#tm-sf').classList.toggle('hidden', view !== 'svc');
+    if (view === 'proc') {
+      const list = procs.filter((p) => !q || `${p.name} ${p.pid} ${p.user} ${p.path} ${p.desc}`.toLowerCase().includes(q))
+        .sort((x, y) => (sort === 'name' ? x.name.localeCompare(y.name) : sort === 'mem' ? y.mem - x.mem : sort === 'pid' ? x.pid - y.pid : y.cpu - x.cpu || y.mem - x.mem));
+      const th = (k, l, right) => `<th class="${right ? 'right' : ''}"><a href="#" data-sort="${k}">${l}${sort === k ? ' ▾' : ''}</a></th>`;
+      $('#tm-body').innerHTML = `<table><thead><tr>${th('name', 'Process')}${th('pid', 'PID', 1)}${th('cpu', 'CPU', 1)}${th('mem', 'Memory', 1)}<th>User</th><th>Started</th><th></th></tr></thead><tbody>
+        ${list.slice(0, 500).map((p) => `<tr data-pid="${p.pid}"><td><strong>${esc(p.name)}</strong>${p.desc && p.desc !== p.name ? `<div class="small muted">${esc(p.desc.slice(0, 120))}</div>` : ''}${p.path ? `<div class="small muted mono" title="${esc(p.path)}">${esc(p.path.length > 70 ? '…' + p.path.slice(-69) : p.path)}</div>` : ''}</td>
+          <td class="right mono small">${p.pid}</td><td class="right nowrap"><span style="color:${p.cpu >= 50 ? 'var(--bad)' : p.cpu >= 10 ? 'var(--warn)' : 'inherit'}">${p.cpu.toFixed(1)}%</span></td>
+          <td class="right nowrap">${fmtBytes(p.mem)}</td><td class="small">${esc(p.user || '')}</td><td class="small nowrap">${p.start ? fmtAgo(p.start) : ''}</td>
+          <td class="right nowrap"><button class="btn sm danger" data-tm="kill">End</button> <button class="btn sm" data-tm="tree" title="End the process and everything it started">End tree</button></td></tr>`).join('')
+          || '<tr><td colspan="7" class="empty">No processes</td></tr>'}</tbody></table>`;
+      status(`${procs.length} processes · ${procs.reduce((s, p) => s + p.cpu, 0).toFixed(0)}% CPU · ${fmtBytes(procs.reduce((s, p) => s + p.mem, 0))}`);
+    } else {
+      const list = svcs.filter((s) => (!q || `${s.name} ${s.display} ${s.desc}`.toLowerCase().includes(q))
+        && (!svcFilter || (svcFilter === 'auto-stopped' ? s.start.startsWith('auto') && s.state !== 'running' : s.state === svcFilter)))
+        .sort((x, y) => (x.display || x.name).localeCompare(y.display || y.name));
+      $('#tm-body').innerHTML = `<table><thead><tr><th>Service</th><th>Status</th><th>Startup</th><th>Account</th><th></th></tr></thead><tbody>
+        ${list.map((s) => `<tr data-svc="${esc(s.name)}"><td><strong>${esc(s.display || s.name)}</strong><div class="small muted mono">${esc(s.name)}</div></td>
+          <td>${s.state === 'running' ? badge('running', 'ok') : s.state === 'failed' ? badge('failed', 'bad') : badge(s.state)}</td>
+          <td class="small">${esc(s.start)}</td><td class="small">${esc(s.account || '')}</td>
+          <td class="right nowrap">${s.state === 'running' ? '<button class="btn sm" data-tm="restart">Restart</button> <button class="btn sm danger" data-tm="stop">Stop</button>' : '<button class="btn sm primary" data-tm="start">Start</button>'}
+            <select data-tm="startup" style="width:auto;display:inline-block"><option value="">Startup…</option><option value="auto">Automatic</option><option value="manual">Manual</option><option value="disabled">Disabled</option></select></td></tr>`).join('')
+          || '<tr><td colspan="5" class="empty">No services</td></tr>'}</tbody></table>`;
+      status(`${svcs.filter((s) => s.state === 'running').length} running of ${svcs.length}`);
+    }
+  };
+  const load = async () => {
+    status('Loading…');
+    try {
+      if (view === 'proc') {
+        const j = await deviceTask(a.id, 'proc.list');
+        procs = parseTsv(j.stdout, 'T').map(([pid, name, cpu, mem, user, path, start, desc]) => ({ pid: Number(pid), name, cpu: Number(cpu) || 0, mem: Number(mem) || 0, user, path, start: Number(start) * 1000 || 0, desc }));
+      } else {
+        const j = await deviceTask(a.id, 'svc.list');
+        svcs = parseTsv(j.stdout, 'S').map(([name, display, state, start, account, pid, desc]) => ({ name, display, state, start, account, pid, desc }));
+      }
+      draw();
+    } catch (err) { status(err.message); }
+  };
+  el.querySelectorAll('[data-v]').forEach((b) => b.addEventListener('click', guard(async () => { view = b.dataset.v; draw(); await load(); })));
+  $('#tm-q').addEventListener('input', (e) => { q = e.target.value.toLowerCase(); draw(); });
+  $('#tm-sf').addEventListener('change', (e) => { svcFilter = e.target.value; draw(); });
+  $('#tm-refresh').addEventListener('click', guard(load));
+  $('#tm-body').addEventListener('click', guard(async (e) => {
+    const s = e.target.closest('[data-sort]');
+    if (s) { e.preventDefault(); sort = s.dataset.sort; draw(); return; }
+    const b = e.target.closest('button[data-tm]');
+    if (!b) return;
+    const tr = b.closest('tr');
+    if (tr.dataset.pid) {
+      const p = procs.find((x) => x.pid === Number(tr.dataset.pid));
+      if (!await confirmDialog(`End ${p.name} (PID ${p.pid})${b.dataset.tm === 'tree' ? ' and all the processes it started' : ''}? Unsaved work in it will be lost.`, { okLabel: 'End process', danger: true })) return;
+      const j = await deviceTask(a.id, 'proc.kill', { pid: p.pid, tree: b.dataset.tm === 'tree' });
+      toast(j.stdout.trim()); await load();
+    } else {
+      b.disabled = true;
+      const j = await deviceTask(a.id, 'svc.control', { name: tr.dataset.svc, action: b.dataset.tm });
+      toast(j.stdout.trim()); await load();
+    }
+  }));
+  $('#tm-body').addEventListener('change', guard(async (e) => {
+    const sel = e.target.closest('select[data-tm="startup"]');
+    if (!sel || !sel.value) return;
+    const j = await deviceTask(a.id, 'svc.control', { name: sel.closest('tr').dataset.svc, action: sel.value });
+    toast(j.stdout.trim()); await load();
+  }));
+  await load();
+}
+
+// ---------------- registry editor (Windows) ----------------
+const REG_TYPES = [['String', 'REG_SZ'], ['ExpandString', 'REG_EXPAND_SZ'], ['MultiString', 'REG_MULTI_SZ'], ['DWord', 'REG_DWORD'], ['QWord', 'REG_QWORD'], ['Binary', 'REG_BINARY']];
+const regTypeName = (t) => (REG_TYPES.find(([k]) => k === t) || [t, t])[1];
+async function devRegistry(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">The registry editor requires the tech role.</div>'; return; }
+  if (!state.reg) state.reg = new Map();
+  let path = state.reg.get(a.id) || '';
+  let keys = [], values = [];
+  el.innerHTML = `<div class="toolbar"><button class="btn sm" id="rg-up" title="Parent key">↑</button>
+      <input type="text" id="rg-path" class="mono" placeholder="HKLM\\SOFTWARE\\…" style="flex:1;min-width:200px">
+      <button class="btn sm" id="rg-go">Go</button><button class="btn sm" id="rg-refresh">Refresh</button>
+      <button class="btn sm" id="rg-newkey">New key</button><button class="btn sm primary" id="rg-newval">New value</button></div>
+    <div class="small muted" id="rg-status" style="margin-bottom:6px"></div>
+    <div class="grid regsplit"><div class="card flush"><div class="table-wrap"><table><thead><tr><th>Keys</th><th></th></tr></thead><tbody id="rg-keys"></tbody></table></div></div>
+      <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Data</th><th></th></tr></thead><tbody id="rg-vals"></tbody></table></div></div></div>
+    <p class="small muted">Edits apply immediately as SYSTEM. HKCU is per user: open HKU and pick the user's SID. Careful: wrong registry changes can break Windows.</p>`;
+  const parent = (p) => (p.includes('\\') ? p.slice(0, p.lastIndexOf('\\')) : '');
+  const draw = () => {
+    $('#rg-path').value = path;
+    $('#rg-newkey').disabled = !path; $('#rg-newval').disabled = !path;
+    $('#rg-keys').innerHTML = keys.map(([n, c]) => `<tr><td><a href="#" data-key="${esc(n)}">📁 ${esc(n)}</a></td><td class="right nowrap">${path ? `<button class="btn sm danger" data-delkey="${esc(n)}">Delete</button>` : ''}</td></tr>`).join('')
+      || '<tr><td colspan="2" class="empty">No subkeys</td></tr>';
+    const show = (v) => { const d = v.data; if (v.type === 'DWord' || v.type === 'QWord') return `${d} <span class="muted">(0x${BigInt(d || 0).toString(16)})</span>`; return esc(d.length > 200 ? d.slice(0, 200) + '…' : d).replace(/\n/g, '<br>'); };
+    $('#rg-vals').innerHTML = !path ? '<tr><td colspan="4" class="empty">Pick a hive on the left</td></tr>' : values.map((v, i) => `<tr data-i="${i}"><td><strong>${esc(v.name || '(Default)')}</strong></td><td class="small nowrap">${regTypeName(v.type)}</td>
+        <td class="small mono">${show(v)}</td><td class="right nowrap"><button class="btn sm" data-rv="edit">Edit</button> <button class="btn sm danger" data-rv="del">Delete</button></td></tr>`).join('')
+      || '<tr><td colspan="4" class="empty">No values</td></tr>';
+  };
+  const load = async () => {
+    state.reg.set(a.id, path);
+    $('#rg-status').textContent = 'Loading…';
+    try {
+      const j = await deviceTask(a.id, 'reg.list', { path });
+      keys = parseTsv(j.stdout, 'K');
+      values = parseTsv(j.stdout, 'V').map(([name, type, b]) => ({ name, type, data: new TextDecoder().decode(Uint8Array.from(atob(b || ''), (c) => c.charCodeAt(0))) }));
+      $('#rg-status').textContent = path ? `${keys.length} subkeys · ${values.length} values` : 'Registry hives';
+    } catch (err) { $('#rg-status').textContent = err.message; keys = []; values = []; }
+    draw();
+  };
+  const go = (p) => { path = p.replace(/\//g, '\\').replace(/\\+$/, ''); return load(); };
+  $('#rg-up').addEventListener('click', guard(() => go(parent(path))));
+  $('#rg-go').addEventListener('click', guard(() => go($('#rg-path').value.trim())));
+  $('#rg-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') guard(() => go(e.target.value.trim()))(); });
+  $('#rg-refresh').addEventListener('click', guard(load));
+  $('#rg-keys').addEventListener('click', guard(async (e) => {
+    const k = e.target.closest('[data-key]');
+    if (k) { e.preventDefault(); return go(path ? `${path}\\${k.dataset.key}` : k.dataset.key); }
+    const d = e.target.closest('[data-delkey]');
+    if (d && await confirmDialog(`Delete the key ${path}\\${d.dataset.delkey} and everything under it? This cannot be undone.`, { okLabel: 'Delete key', danger: true })) {
+      const j = await deviceTask(a.id, 'reg.delete', { path: `${path}\\${d.dataset.delkey}`, what: 'key' }); toast(j.stdout.trim()); await load();
+    }
+  }));
+  const valueModal = (v) => {
+    const m = openModal(v ? `Edit ${v.name || '(Default)'}` : 'New registry value', `<form id="rv-form">
+      <div class="field"><label>Name</label><input type="text" name="name" value="${esc(v?.name || '')}" ${v ? 'readonly' : ''} placeholder="(leave empty for the default value)"></div>
+      <div class="field"><label>Type</label><select name="type" ${v ? 'disabled' : ''}>${REG_TYPES.map(([k, l]) => `<option value="${k}" ${(v?.type || 'String') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="field"><label>Data</label><textarea name="data" rows="4" class="mono">${esc(v?.data || '')}</textarea>
+        <div class="small muted">DWORD/QWORD: decimal or 0x hex. Multi-string: one per line. Binary: hex bytes (e.g. 01 a0 ff).</div></div></form>`,
+    { foot: '<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="rv-form">Save</button>' });
+    $('#rv-form', m).addEventListener('submit', guard(async (e) => {
+      e.preventDefault();
+      const f = e.target.elements;
+      const j = await deviceTask(a.id, 'reg.set', { path, name: f.name.value, type: v?.type || f.type.value, data: f.data.value });
+      closeModal(); toast(j.stdout.trim()); await load();
+    }));
+  };
+  $('#rg-vals').addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-rv]');
+    if (!b) return;
+    const v = values[Number(b.closest('tr').dataset.i)];
+    if (b.dataset.rv === 'edit') valueModal(v);
+    else if (await confirmDialog(`Delete the value "${v.name || '(Default)'}"?`, { okLabel: 'Delete', danger: true })) {
+      const j = await deviceTask(a.id, 'reg.delete', { path, name: v.name, what: 'value' }); toast(j.stdout.trim()); await load();
+    }
+  }));
+  $('#rg-newval').addEventListener('click', () => valueModal(null));
+  $('#rg-newkey').addEventListener('click', guard(async () => {
+    const name = await promptDialog('New key', 'Key name');
+    if (!name) return;
+    const j = await deviceTask(a.id, 'reg.newkey', { path, name }); toast(j.stdout.trim()); await load();
+  }));
+  await load();
+}
+
+// ---------------- compliance (policies on one device) ----------------
+const RESULT_BADGE = { pass: ['Compliant', 'ok'], fixed: ['Fixed', 'info'], fail: ['Not compliant', 'bad'], error: ['Error', 'warn'], na: ['N/A', ''] };
+const resultBadge = (s) => { const [l, c] = RESULT_BADGE[s] || [s || 'not checked', '']; return badge(l, c); };
+async function devCompliance(el, a) {
+  const [pols, catalog] = await Promise.all([api('GET', `/api/agents/${a.id}/compliance`), api('GET', '/api/policy-rules')]);
+  const ruleTitle = (r) => (r.type === 'custom_script' ? r.params.label : catalog.find((c) => c.id === r.type)?.title || r.type) + (r.params?.name && r.type.startsWith('service_') ? `: ${r.params.name}` : '');
+  el.innerHTML = pols.length ? pols.map((p) => {
+    const res = new Map(p.results.map((r) => [r.rule_key, r]));
+    const at = Math.max(0, ...p.results.map((r) => r.checked_at));
+    return `<div class="card" style="margin-bottom:14px"><div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <div><strong>${esc(p.name)}</strong> ${p.enforce ? badge('enforced', 'info') : badge('report only')}${p.enabled ? '' : ` ${badge('disabled', 'warn')}`}
+          <div class="small muted">${at ? `Checked ${fmtAgo(at)}` : 'Not checked yet'}</div></div>
+        ${can('tech') ? `<button class="btn sm" data-run="${p.id}">Check now</button>` : ''}</div>
+      <table class="dash"><tbody>${p.rules.map((r) => { const x = res.get(r.key); return `<tr><td>${esc(ruleTitle(r))}</td><td class="small muted">${esc(x?.detail || '')}</td><td class="right">${x ? resultBadge(x.status) : badge('not checked')}</td></tr>`; }).join('')}
+      ${res.get('_run') ? `<tr><td colspan="3" class="small bad-text">${esc(res.get('_run').detail)}</td></tr>` : ''}</tbody></table></div>`;
+  }).join('') : `<div class="card">No policies apply to this device. ${can('admin') ? '<a href="#/policies">Create a policy →</a>' : ''}</div>`;
+  el.addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-run]');
+    if (!b) return;
+    b.disabled = true;
+    const r = await api('POST', `/api/policies/${b.dataset.run}/run`, { agent_id: a.id });
+    toast(r.created ? 'Policy check queued. Results appear here when it finishes.' : 'A check is already queued for this device');
+    if (r.jobs?.[0]) { await pollJob(r.jobs[0].id); router(); }
+  }));
+}
+
+// ---------------- chat with the signed-in user ----------------
+async function devChat(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">Chat requires the tech role.</div>'; return; }
+  let lastId = 0, msgs = [], alive = true;
+  el.innerHTML = `<div class="card chatcard"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">Chat with ${esc(a.logged_user || 'the signed-in user')}</h3>
+      <span class="small muted" id="ch-status"></span></div>
+    <div class="chatlog" id="ch-log"><div class="muted small">Loading…</div></div>
+    <form id="ch-form" class="chatform"><textarea name="body" rows="2" placeholder="Write a message… (Enter to send, Shift+Enter for a new line)" maxlength="4000"></textarea><button class="btn primary">Send</button></form>
+    <p class="small muted" style="margin:8px 0 0">The message pops up on the device through the HostPilot taskbar icon, and the user can reply. Users can also start a chat from the icon's menu. Requires the taskbar icon (Settings → Windows taskbar icon).</p></div>`;
+  const draw = () => {
+    const log = $('#ch-log');
+    if (!log) { alive = false; return; }
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    log.innerHTML = msgs.map((m) => `<div class="msg ${m.direction}"><div class="msg-b">${esc(m.body).replace(/\n/g, '<br>')}</div>
+      <div class="msg-m">${m.direction === 'tech' ? esc(m.author) : esc(m.author || 'User')} · ${new Date(m.created_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}${m.direction === 'tech' ? (m.read_at ? ' · delivered' : ' · waiting for the device') : ''}</div></div>`).join('')
+      || '<div class="muted small">No messages yet. Say hello!</div>';
+    if (stick) log.scrollTop = log.scrollHeight;
+  };
+  const merge = (list) => { for (const m of list) { const i = msgs.findIndex((x) => x.id === m.id); if (i >= 0) msgs[i] = m; else msgs.push(m); lastId = Math.max(lastId, m.id); } };
+  const first = await api('GET', `/api/agents/${a.id}/chat`);
+  merge(first.messages);
+  draw(); $('#ch-log').scrollTop = 1e9;
+  $('#ch-status').textContent = a.online ? 'Device online' : 'Device offline: messages are delivered when it reconnects';
+  (async () => { // long-poll for replies and delivery receipts
+    while (alive && $('#ch-log')) {
+      try {
+        const r = await api('GET', `/api/agents/${a.id}/chat?after=${lastId}&wait=25`);
+        merge(r.messages);
+        // refresh delivery state of our own recent messages
+        const pending = msgs.filter((m) => m.direction === 'tech' && !m.read_at);
+        if (pending.length) { const all2 = await api('GET', `/api/agents/${a.id}/chat`); merge(all2.messages); }
+        draw();
+      } catch { await new Promise((r) => setTimeout(r, 5000)); }
+    }
+  })();
+  const form = $('#ch-form');
+  form.body.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  form.addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const body = form.body.value.trim();
+    if (!body) return;
+    const m = await api('POST', `/api/agents/${a.id}/chat`, { body });
+    form.body.value = '';
+    merge([m]); draw(); $('#ch-log').scrollTop = 1e9;
+  }));
+  form.body.focus();
+}
+
+async function pageMessages(view) {
+  const draw = async () => {
+    const list = await api('GET', '/api/chat/conversations');
+    view.innerHTML = `<div class="page-head"><h1>Messages</h1></div>
+      <p class="small muted" style="margin-top:-8px">Chats with signed-in users through the HostPilot taskbar icon (Windows). Open a device's Chat tab to start one.</p>
+      <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Device</th><th>Last message</th><th>When</th><th></th></tr></thead><tbody>
+      ${list.map((c) => `<tr class="clickable" data-href="#/devices/${c.agent_id}/chat"><td><strong>${esc(c.hostname)}</strong><div class="small muted">${esc(c.logged_user || '')}</div></td>
+        <td class="small">${c.last_dir === 'tech' ? '<span class="muted">You: </span>' : ''}${esc((c.last_body || '').slice(0, 120))}</td><td class="small nowrap">${fmtAgo(c.last_at)}</td>
+        <td class="right">${c.unread ? badge(`${c.unread} new`, 'bad') : ''}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">No conversations yet</td></tr>'}</tbody></table></div></div>`;
+  };
+  await draw();
+  every(10000, draw);
+}
+
+// ---------------- policies (configuration baselines) ----------------
+const TARGET_CLASSES = [['desktop', 'Desktops'], ['laptop', 'Laptops'], ['server', 'Servers'], ['vm', 'Virtual machines']];
+function targetSummary(t, clients) {
+  if (t.agents?.length) return `${plural(t.agents.length, 'selected device')}`;
+  const parts = [t.platform === 'any' ? 'All platforms' : t.platform === 'windows' ? 'Windows' : 'Linux'];
+  parts.push(t.classes?.length ? t.classes.map((c) => (TARGET_CLASSES.find(([k]) => k === c) || [c, c])[1]).join(', ') : 'all device types');
+  if (t.clients?.length) parts.push(t.clients.map((id) => clients.find((c) => c.id === id)?.name || `#${id}`).join(', '));
+  else parts.push('all clients');
+  return parts.join(' · ');
+}
+
+async function pagePolicies(view) {
+  const [pols, clients] = await Promise.all([api('GET', '/api/policies'), api('GET', '/api/clients')]);
+  view.innerHTML = `<div class="page-head"><h1>Policies</h1>${can('admin') ? '<a class="btn primary" href="#/policies/new">+ New policy</a>' : ''}</div>
+    <p class="small muted" style="margin-top:-8px">Configuration baselines and security policies. Each policy targets a group of devices (by client, device type, platform, or a hand-picked list) and checks its rules on a schedule. With <strong>Enforce</strong> on, settings that drift are fixed automatically.</p>
+    ${pols.length ? `<div class="grid cols-2">${pols.map((p) => { const c = p.compliance; const pc = c.checked ? Math.round((c.compliant / c.checked) * 100) : null; return `<a class="card netcard" href="#/policies/${p.id}">
+      <div class="row" style="justify-content:space-between"><strong>${esc(p.name)}</strong><span>${p.enforce ? badge('enforce', 'info') : badge('report only')}${p.enabled ? '' : ` ${badge('disabled', 'warn')}`}</span></div>
+      <div class="small muted">${esc(targetSummary(p.target, clients))} · ${plural(p.rules.length, 'rule')} · every ${p.interval_hours} h</div>
+      <div>${pc == null ? '<span class="small muted">Not checked yet</span>' : `<div class="meter"><div class="bar ${pc < 70 ? 'bad' : pc < 100 ? 'warn' : ''}"><span style="width:${pc}%"></span></div><span class="n">${pc}%</span></div>`}</div>
+      <div class="small">${badge(`${c.compliant} compliant`, 'ok')} ${c.non_compliant ? badge(`${c.non_compliant} not compliant`, 'bad') : ''} ${c.not_checked ? badge(`${c.not_checked} not checked`) : ''}${c.fixed ? ` ${badge(`${c.fixed} auto-fixed`, 'info')}` : ''}</div></a>`; }).join('')}</div>`
+    : `<div class="card"><h2>No policies yet</h2><p>Start with a baseline such as: firewall on, Defender real-time protection, SMBv1 off, screen lock after 15 minutes, and "Spooler stopped" on servers.</p></div>`}`;
+}
+
+async function pagePolicyEdit(view, id) {
+  if (!can('admin')) { view.innerHTML = '<div class="card">Only admins can create or edit policies.</div>'; return; }
+  const [catalog, clients, agents, existing] = await Promise.all([api('GET', '/api/policy-rules'), api('GET', '/api/clients'), api('GET', '/api/agents'),
+    id === 'new' ? null : api('GET', `/api/policies/${id}`)]);
+  const p = existing || { name: '', description: '', enabled: true, enforce: false, interval_hours: 24, target: { platform: 'any', clients: [], classes: [], agents: [] }, rules: [] };
+  let rules = p.rules.map((r) => ({ type: r.type, params: { ...r.params } }));
+  const byId = new Map(catalog.map((c) => [c.id, c]));
+  const paramInput = (r, i, d) => {
+    const v = r.params[d.key] ?? d.default ?? '';
+    const name = `p-${i}-${d.key}`;
+    if (d.type === 'select') return `<select name="${name}">${d.options.map(([o, l]) => `<option value="${esc(o)}" ${String(v) === o ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+    if (d.type === 'textarea') return `<textarea name="${name}" rows="4" class="code" style="min-height:80px">${esc(v)}</textarea>`;
+    return `<input type="${d.type === 'number' ? 'number' : 'text'}" name="${name}" value="${esc(v)}" ${d.required ? 'required' : ''}>`;
+  };
+  const drawRules = () => {
+    $('#pe-rules').innerHTML = rules.map((r, i) => { const d = byId.get(r.type); return `<div class="rulecard" data-i="${i}">
+      <div class="row" style="justify-content:space-between"><div><strong>${esc(d.title)}</strong> <span class="small muted">${d.platforms.map((x) => (x === 'windows' ? 'Windows' : 'Linux')).join(' + ')}${d.fixable ? '' : ' · report only'}</span></div>
+        <button type="button" class="btn sm danger" data-rm="${i}">Remove</button></div>
+      ${d.description ? `<div class="small muted" style="margin:4px 0 6px">${esc(d.description)}</div>` : ''}
+      ${d.params.length ? `<div class="form-grid">${d.params.map((pd) => `<div class="field" ${pd.type === 'textarea' ? 'style="grid-column:1/-1"' : ''}><label>${esc(pd.label)}</label>${paramInput(r, i, pd)}</div>`).join('')}</div>` : ''}</div>`; }).join('')
+      || '<div class="muted small">No rules yet. Add some below.</div>';
+  };
+  const cats = [...new Set(catalog.map((c) => c.category))];
+  view.innerHTML = `<div class="page-head"><h1>${existing ? `Edit policy` : 'New policy'}</h1></div>
+    <form id="pe-form" class="stack">
+      <div class="card"><div class="form-grid"><div class="field"><label>Name</label><input type="text" name="name" required maxlength="100" value="${esc(p.name)}" placeholder="e.g. Workstation security baseline"></div>
+        <div class="field"><label>Check every</label><select name="interval_hours">${[[1, '1 hour'], [4, '4 hours'], [12, '12 hours'], [24, 'Day'], [168, 'Week']].map(([v, l]) => `<option value="${v}" ${p.interval_hours === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+        <div class="field"><label>Description (optional)</label><input type="text" name="description" maxlength="500" value="${esc(p.description)}"></div>
+        <label class="check"><input type="checkbox" name="enabled" ${p.enabled ? 'checked' : ''}> Enabled</label>
+        <label class="check" style="margin-top:6px"><input type="checkbox" name="enforce" ${p.enforce ? 'checked' : ''}> <span><strong>Enforce</strong>: automatically fix settings that aren't compliant (otherwise report only)</span></label></div>
+      <div class="card"><h2>Devices</h2>
+        <div class="form-grid"><div class="field"><label>Platform</label><select name="platform">${[['any', 'Windows and Linux'], ['windows', 'Windows only'], ['linux', 'Linux only']].map(([v, l]) => `<option value="${v}" ${p.target.platform === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+        <div class="field"><label>Device types (none ticked = all)</label><div class="row">${TARGET_CLASSES.map(([k, l]) => `<label class="check"><input type="checkbox" name="cls-${k}" ${p.target.classes?.includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div></div>
+        <div class="field"><label>Clients (none ticked = all)</label><div class="row">${clients.map((c) => `<label class="check"><input type="checkbox" name="cli-${c.id}" ${p.target.clients?.includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('') || '<span class="small muted">No clients</span>'}</div></div>
+        <details ${p.target.agents?.length ? 'open' : ''}><summary class="small">Or pick specific devices (overrides the filters above)</summary>
+          <div class="pickgrid">${agents.map((x) => `<label class="check small"><input type="checkbox" name="agt-${x.id}" ${p.target.agents?.includes(x.id) ? 'checked' : ''}> ${esc(x.hostname)} <span class="muted">${esc(x.client_name || '')}</span></label>`).join('')}</div></details>
+        <div class="small muted" id="pe-count" style="margin-top:8px"></div></div>
+      <div class="card"><h2>Rules</h2><div id="pe-rules" class="stack"></div>
+        <div class="row" style="margin-top:12px"><select id="pe-add" style="width:auto"><option value="">+ Add rule…</option>${cats.map((c) => `<optgroup label="${esc(c)}">${catalog.filter((x) => x.category === c).map((x) => `<option value="${x.id}">${esc(x.title)}${x.platforms.length === 1 ? ` (${x.platforms[0] === 'windows' ? 'Windows' : 'Linux'})` : ''}</option>`).join('')}</optgroup>`).join('')}</select></div></div>
+      <div class="row"><button class="btn primary">${existing ? 'Save' : 'Create and run'}</button>${existing ? '<label class="check"><input type="checkbox" name="run_now" checked> Run now after saving</label>' : ''}
+        <a class="btn" href="${existing ? `#/policies/${existing.id}` : '#/policies'}">Cancel</a>${existing ? '<span class="grow"></span><button type="button" class="btn danger" id="pe-del">Delete policy</button>' : ''}</div>
+    </form>`;
+  const f = $('#pe-form');
+  const collectParams = () => rules.forEach((r, i) => byId.get(r.type).params.forEach((d) => { const el2 = f.elements.namedItem(`p-${i}-${d.key}`); if (el2) r.params[d.key] = el2.value; }));
+  const target = () => ({
+    platform: f.elements.platform.value,
+    classes: TARGET_CLASSES.map(([k]) => k).filter((k) => f.elements.namedItem(`cls-${k}`).checked),
+    clients: clients.map((c) => c.id).filter((cid) => f.elements.namedItem(`cli-${cid}`).checked),
+    agents: agents.map((x) => x.id).filter((aid) => f.elements.namedItem(`agt-${aid}`)?.checked),
+  });
+  const count = () => {
+    const t = target();
+    const n = t.agents.length ? t.agents.length : agents.filter((x) => (t.platform === 'any' || x.platform === t.platform) && (!t.classes.length || t.classes.includes(x.device_class)) && (!t.clients.length || t.clients.includes(x.client_id))).length;
+    $('#pe-count').textContent = `Applies to ${plural(n, 'device')} right now (new devices that match are included automatically${t.agents.length ? ', except with hand-picked devices' : ''}).`;
+  };
+  drawRules(); count();
+  f.addEventListener('change', (e) => { if (!e.target.name?.startsWith('p-')) count(); });
+  $('#pe-add').addEventListener('change', (e) => {
+    const d = byId.get(e.target.value);
+    e.target.value = '';
+    if (!d) return;
+    collectParams();
+    rules.push({ type: d.id, params: Object.fromEntries(d.params.map((pd) => [pd.key, pd.default ?? ''])) });
+    drawRules();
+  });
+  $('#pe-rules').addEventListener('click', (e) => { const b = e.target.closest('[data-rm]'); if (b) { collectParams(); rules.splice(Number(b.dataset.rm), 1); drawRules(); } });
+  f.addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    collectParams();
+    const body = { name: f.elements.name.value, description: f.elements.description.value, enabled: f.elements.enabled.checked, enforce: f.elements.enforce.checked,
+      interval_hours: Number(f.elements.interval_hours.value), target: target(), rules, run_now: existing ? f.elements.run_now?.checked : true };
+    if (body.enforce && !existing?.enforce && !await confirmDialog('Enforce mode changes settings on the targeted devices automatically. Continue?', { okLabel: 'Enforce' })) return;
+    const r = existing ? await api('PUT', `/api/policies/${existing.id}`, body) : await api('POST', '/api/policies', body);
+    toast(existing ? 'Policy saved' : 'Policy created and queued on the targeted devices');
+    location.hash = `#/policies/${r.id}`;
+  }));
+  $('#pe-del')?.addEventListener('click', guard(async () => {
+    if (!await confirmDialog(`Delete the policy "${existing.name}"? Settings already applied to devices stay as they are.`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/policies/${existing.id}`); location.hash = '#/policies';
+  }));
+}
+
+async function pagePolicy(view, id) {
+  const draw = async () => {
+    const [p, clients, catalog] = await Promise.all([api('GET', `/api/policies/${id}`), api('GET', '/api/clients'), api('GET', '/api/policy-rules')]);
+    const c = p.compliance;
+    const title = (r) => (r.type === 'custom_script' ? r.params.label : catalog.find((x) => x.id === r.type)?.title || r.type) + (r.params?.name && r.type.startsWith('service_') ? `: ${r.params.name}` : '');
+    const cell = (res) => { if (!res) return '<span class="cstat none" title="Not checked">–</span>'; const cls = { pass: 'ok', fixed: 'fix', fail: 'bad', error: 'err', na: 'na' }[res.status] || 'none';
+      return `<span class="cstat ${cls}" title="${esc(`${RESULT_BADGE[res.status]?.[0] || res.status}: ${res.detail || ''}`)}">${{ pass: '✓', fixed: '✓', fail: '✕', error: '!', na: '–' }[res.status] || '?'}</span>`; };
+    view.innerHTML = `<div class="page-head"><div><h1>${esc(p.name)}</h1><div class="small muted" style="margin-top:4px">${esc(targetSummary(p.target, clients))} · every ${p.interval_hours} h · ${p.enforce ? 'enforced' : 'report only'}${p.enabled ? '' : ' · disabled'}${p.last_run ? ` · last run ${fmtAgo(p.last_run)}` : ''}</div></div>
+      <div class="row">${can('tech') ? '<button class="btn primary" id="pp-run">Run now</button>' : ''}${can('admin') ? `<a class="btn" href="#/policies/${p.id}/edit">Edit</a>` : ''}</div></div>
+      ${p.description ? `<p class="small muted" style="margin-top:-8px">${esc(p.description)}</p>` : ''}
+      <div class="row" style="margin-bottom:12px">${badge(`${c.compliant} compliant`, 'ok')} ${badge(`${c.non_compliant} not compliant`, c.non_compliant ? 'bad' : '')} ${badge(`${c.not_checked} not checked`)} ${c.fixed ? badge(`${c.fixed} auto-fixed`, 'info') : ''}</div>
+      <div class="card flush"><div class="table-wrap"><table class="matrix"><thead><tr><th>Device</th>${p.rules.map((r) => `<th class="rot" title="${esc(title(r))}"><span>${esc(title(r))}</span></th>`).join('')}<th>Checked</th></tr></thead><tbody>
+      ${p.devices.map((d) => { const res = new Map(d.results.map((x) => [x.rule_key, x])); const at = Math.max(0, ...d.results.map((x) => x.checked_at));
+        return `<tr><td><a href="#/devices/${d.id}/compliance"><strong>${esc(d.hostname)}</strong></a><div class="small muted">${esc(CLASS_INFO[d.device_class]?.[0] || '')} · ${esc(d.platform)}</div></td>
+          ${p.rules.map((r) => `<td class="center">${cell(res.get(r.key))}</td>`).join('')}<td class="small nowrap">${at ? fmtAgo(at) : '—'}${res.get('_run') ? ` ${badge('failed', 'bad')}` : ''}</td></tr>`; }).join('')
+        || `<tr><td colspan="${p.rules.length + 2}" class="empty">No devices match this policy</td></tr>`}</tbody></table></div></div>
+      <p class="small muted">✓ compliant (blue: fixed automatically) · ✕ not compliant · ! error · – not applicable / not checked. Hover a cell for details.</p>`;
+    $('#pp-run')?.addEventListener('click', guard(async () => { const r = await api('POST', `/api/policies/${id}/run`); toast(`Queued on ${plural(r.created, 'device')}`); }));
+  };
+  await draw();
+  every(15000, draw);
+}
+
+// unread chat badge in the menu
+async function updateChatBadge() {
+  try {
+    const u = await api('GET', '/api/chat/unread');
+    const n = u.reduce((s, x) => s + x.unread, 0);
+    const b = $('#nav-chat');
+    if (b) { b.textContent = n; b.classList.toggle('hidden', !n); }
+    const known = state.chatSeen || 0;
+    const newest = Math.max(0, ...u.map((x) => x.last_at));
+    if (newest > known && state.chatSeen != null && !location.hash.endsWith('/chat')) {
+      const c = u.find((x) => x.last_at === newest);
+      toast(`New message from ${c.hostname}: ${c.last_body.slice(0, 80)}`);
+    }
+    state.chatSeen = Math.max(known, newest);
+  } catch { /* signed out */ }
+}
+setInterval(() => { if (state.user && can('tech')) updateChatBadge(); }, 15000);
+
 // ---------------- devices ----------------
 async function pageDevices(view) {
   const clients = await api('GET', '/api/clients');
@@ -761,19 +1181,22 @@ async function pageDevices(view) {
       <select id="dev-client"><option value="">All clients</option>${clients.map((c) => `<option value="${c.id}" ${String(f.client) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="dev-status"><option value="">Any status</option><option value="online">Online</option><option value="offline">Offline</option><option value="alerts">With alerts</option><option value="maintenance">Maintenance</option></select>
       <select id="dev-platform"><option value="">All platforms</option><option value="windows">Windows</option><option value="linux">Linux</option></select>
+      <select id="dev-class"><option value="">All device types</option><option value="desktop">Desktops</option><option value="laptop">Laptops</option><option value="server">Servers</option><option value="vm">Virtual machines</option></select>
       <span class="muted small" id="dev-count"></span>
     </div>
     <div class="card flush"><div class="table-wrap"><table>
-      <thead><tr><th style="width:32px"><input type="checkbox" id="dev-all"></th><th>Hostname</th><th>Client</th><th>OS</th><th>IP</th><th>User</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Last seen</th></tr></thead>
+      <thead><tr><th style="width:32px"><input type="checkbox" id="dev-all"></th><th>Hostname</th><th>Client</th><th>Type</th><th>OS</th><th>IP</th><th>User</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Last seen</th></tr></thead>
       <tbody id="dev-body"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody></table></div></div>`;
   $('#dev-status').value = f.status;
   $('#dev-platform').value = f.platform;
+  $('#dev-class').value = f.cls || '';
   let agents = [];
   const filtered = () => {
     const q = f.q.toLowerCase();
     return agents.filter((a) => {
       if (f.client && String(a.client_id) !== String(f.client)) return false;
       if (f.platform && a.platform !== f.platform) return false;
+      if (f.cls && a.device_class !== f.cls) return false;
       if (f.status === 'online' && !a.online) return false;
       if (f.status === 'offline' && a.online) return false;
       if (f.status === 'alerts' && !a.open_alerts) return false;
@@ -788,11 +1211,11 @@ async function pageDevices(view) {
     $('#dev-body').innerHTML = list.map((a) => `<tr class="clickable" data-href="#/devices/${a.id}">
       <td data-stop><input type="checkbox" class="dev-cb" value="${a.id}" ${state.selected.has(a.id) ? 'checked' : ''}></td>
       <td class="nowrap">${statusDot(a)}<strong>${esc(a.hostname)}</strong>${a.open_alerts ? ` ${badge(a.open_alerts + ' alert' + (a.open_alerts > 1 ? 's' : ''), 'bad')}` : ''}</td>
-      <td>${esc(a.client_name || '—')}</td><td>${osCell(a)}</td>
+      <td>${esc(a.client_name || '—')}</td><td>${classBadge(a.device_class)}</td><td>${osCell(a)}</td>
       <td class="mono small">${esc((a.ip_addrs || [])[0] || '')}</td><td class="small">${esc(a.logged_user || '')}</td>
       <td>${a.online ? meter(a.cpu_pct) : '<span class="muted">—</span>'}</td><td>${a.online ? meter(a.mem_pct) : '<span class="muted">—</span>'}</td><td>${meter(a.disk_pct)}</td>
       <td class="nowrap small ${a.online ? '' : 'muted'}">${a.online ? 'Online' : fmtAgo(a.last_seen)}</td></tr>`).join('')
-      || `<tr><td colspan="10" class="empty">${agents.length ? 'No devices match the filters' : 'No devices yet. Go to a client page to get an install command.'}</td></tr>`;
+      || `<tr><td colspan="11" class="empty">${agents.length ? 'No devices match the filters' : 'No devices yet. Go to a client page to get an install command.'}</td></tr>`;
     syncSel();
   };
   const syncSel = () => {
@@ -810,6 +1233,7 @@ async function pageDevices(view) {
   $('#dev-client').addEventListener('change', (e) => { f.client = e.target.value; drawRows(); });
   $('#dev-status').addEventListener('change', (e) => { f.status = e.target.value; drawRows(); });
   $('#dev-platform').addEventListener('change', (e) => { f.platform = e.target.value; drawRows(); });
+  $('#dev-class').addEventListener('change', (e) => { f.cls = e.target.value; drawRows(); });
   $('#dev-body').addEventListener('change', (e) => {
     if (!e.target.classList.contains('dev-cb')) return;
     e.target.checked ? state.selected.add(e.target.value) : state.selected.delete(e.target.value);
@@ -847,21 +1271,24 @@ async function pageDevices(view) {
 // ---------------- device detail ----------------
 async function pageDevice(view, id, tab = 'overview') {
   const a = await api('GET', `/api/agents/${id}`);
-  const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['updates', 'Updates'], ['software', 'Software'],
-    ['users', 'Users'], ['hardware', 'Hardware'], ['firewall', 'Firewall'], ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+  const win = a.platform === 'windows';
+  const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['tasks', 'Task manager'], ...(win ? [['registry', 'Registry']] : []),
+    ['updates', 'Updates'], ['software', 'Software'], ['users', 'Users'], ['hardware', 'Hardware'], ['firewall', 'Firewall'], ['compliance', 'Compliance'],
+    ...(win ? [['chat', 'Chat']] : []), ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+  const term = (shell, label) => `<a class="btn" href="/terminal.html#${encodeURIComponent(a.id)}${shell ? `/${shell}` : ''}" target="_blank" rel="noopener" title="Opens a background session as SYSTEM/root; the signed-in user sees nothing">${label}</a>`;
   view.innerHTML = `
     <div class="page-head"><div>
       <h1>${statusDot(a)}${esc(a.hostname)}</h1>
-      <div class="muted small" style="margin-top:4px">${osCell(a)} · ${a.client_name ? `<a href="#/clients/${a.client_id}">${esc(a.client_name)}</a>` : 'No client'} · ${a.maintenance ? badge('maintenance', 'warn') : a.online ? badge('online', 'ok') : badge(`offline · ${fmtAgo(a.last_seen)}`, 'bad')}</div></div>
-      <div class="row">${can('tech') && a.platform === 'windows' ? `<a class="btn primary" href="/remote.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Remote control</a>` : ''}
-      ${can('tech') && a.platform === 'linux' ? `<a class="btn primary" href="/terminal.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Terminal</a>` : ''}
+      <div class="muted small" style="margin-top:4px">${osCell(a)} · ${classBadge(a.device_class)} · ${a.client_name ? `<a href="#/clients/${a.client_id}">${esc(a.client_name)}</a>` : 'No client'} · ${a.maintenance ? badge('maintenance', 'warn') : a.online ? badge('online', 'ok') : badge(`offline · ${fmtAgo(a.last_seen)}`, 'bad')}</div></div>
+      <div class="row">${can('tech') && win ? `<a class="btn primary" href="/remote.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Remote control</a>${term('powershell', 'PowerShell')}${term('cmd', 'Command Prompt')}` : ''}
+      ${can('tech') && !win ? `<a class="btn primary" href="/terminal.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Terminal</a>` : ''}
       ${can('tech') ? `<button class="btn" data-action="run-on" data-ids="${a.id}">Run script</button><button class="btn" data-action="refresh-inv" data-id="${a.id}">Refresh inventory</button>` : ''}</div></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/devices/${a.id}/${k}" class="${k === tab ? 'active' : ''}">${l}</a>`).join('')}</nav>
     <div id="tab"></div>`;
   const el = $('#tab');
   const fn = {
     overview: devOverview, terminal: devTerminal, files: devFiles, updates: devUpdates, software: devSoftware, users: devUsers,
-    hardware: devHardware, firewall: devFirewall,
+    hardware: devHardware, firewall: devFirewall, tasks: devTaskManager, registry: devRegistry, compliance: devCompliance, chat: devChat,
     jobs: devJobs, alerts: devAlerts, settings: devSettings,
   }[tab] || devOverview;
   await fn(el, a);
@@ -884,10 +1311,15 @@ async function devOverview(el, a) {
       ${kv('Inventory', a.inventory_at ? fmtAgo(a.inventory_at) : 'pending')}${kv('Device ID', `<span class="mono small">${esc(a.id)}</span>`)}
     </dl></div>
     <div class="card"><h3>Utilization</h3>
-      <dl class="kv">${kv('CPU', meter(a.cpu_pct))}${kv('Memory', meter(a.mem_pct))}
+      <dl class="kv">${kv('CPU', meter(a.cpu_pct))}
+      ${Array.isArray(a.core_load) && a.core_load.length ? kv(`Per core <span class="small muted">(${a.core_load.length})</span>`, coreGrid(a.core_load)) : ''}
+      ${kv('Memory', meter(a.mem_pct))}${kv('Uptime', a.boot_time ? fmtDur(Date.now() - a.boot_time) : '')}
       ${(a.disks || []).map((d) => kv(can('tech') ? `<a href="#/devices/${a.id}/files" data-action="open-drive" data-id="${a.id}" data-path="${esc(drivePath(a, d.mount))}" title="Browse in Files">${esc(d.mount)}</a>` : esc(d.mount),
         `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`)).join('')}</dl>
       ${can('tech') ? `<div class="small muted">Click a drive to browse it · <a href="#/devices/${a.id}/hardware">Disk health & details</a></div>` : ''}</div>
+    <div class="card"><h3>Monitored services</h3>${(a.services || []).length ? `<table class="dash"><tbody>${a.services.map((s) => `<tr><td><strong>${esc(s.display || s.name)}</strong>${s.display ? `<div class="small muted mono">${esc(s.name)}</div>` : ''}</td>
+        <td class="small muted">${esc(s.start)}</td><td class="right">${s.status === 'running' ? badge('running', 'ok') : s.status === 'missing' ? badge('not installed', 'warn') : badge(s.status, 'bad')}</td></tr>`).join('')}</tbody></table>`
+      : '<div class="small muted">No services are monitored on this device. Add them in Settings (all devices), on this device\'s Settings tab, or with a "Service running" policy rule. You get an alert when a monitored service stops.</div>'}</div>
     ${chartCard('perf', 'Performance')}
     ${chartCard('net', 'Network traffic')}
     <div class="card" style="grid-column:1/-1"><h3>Network interfaces</h3>${ifaceTable(a.net_ifaces)}</div>
@@ -1693,6 +2125,8 @@ async function devSettings(el, a) {
       <div class="field"><label>Client</label><select name="client_id"><option value="">— none —</option>${clients.map((c) => `<option value="${c.id}" ${c.id === a.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
       <div class="field"><label>Notes</label><textarea name="notes" rows="5">${esc(a.notes)}</textarea></div>
       <div class="field"><label class="check"><input type="checkbox" name="maintenance" ${a.maintenance ? 'checked' : ''}> Maintenance mode (suppress alerts)</label></div>
+      <div class="field"><label>Extra services to monitor on this device</label><input type="text" name="watch_services" value="${esc(a.watch_services || '')}" placeholder="${a.platform === 'windows' ? 'e.g. MSSQLSERVER, W3SVC' : 'e.g. nginx, postgresql'}">
+        <div class="small muted">Comma separated service names. You get an alert when one stops. Services for all devices are set in Settings.</div></div>
       <button class="btn primary">Save</button></form>
     <div class="card"><h2>Agent</h2>
       <p class="small muted">Installed version <span class="mono">${esc(a.agent_version) || '—'}</span>${a.update_pending ? ' · a newer version is available (it installs automatically)' : ' · up to date'}.
@@ -1707,7 +2141,7 @@ async function devSettings(el, a) {
   $('#dev-form').addEventListener('submit', guard(async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
-    await api('PUT', `/api/agents/${a.id}`, { client_id: f.get('client_id') || null, notes: f.get('notes'), maintenance: f.get('maintenance') === 'on' });
+    await api('PUT', `/api/agents/${a.id}`, { client_id: f.get('client_id') || null, notes: f.get('notes'), maintenance: f.get('maintenance') === 'on', watch_services: f.get('watch_services') });
     toast('Device saved');
     router();
   }));
@@ -2071,6 +2505,10 @@ async function pageSettings(view) {
       <div class="field"><label>Windows taskbar icon</label><select name="tray_icon" style="width:auto">
         <option value="1" ${s.tray_icon ? 'selected' : ''}>Show the HostPilot status icon to logged-in users</option>
         <option value="0" ${s.tray_icon ? '' : 'selected'}>Hidden (removed from devices on their next check-in)</option></select></div>
+      <div class="form-grid">
+        <div class="field"><label>Services monitored on all Windows devices</label><input type="text" name="watch_services_windows" value="${esc(s.watch_services_windows)}" placeholder="e.g. Spooler, WinDefend"></div>
+        <div class="field"><label>Services monitored on all Linux devices</label><input type="text" name="watch_services_linux" value="${esc(s.watch_services_linux)}" placeholder="e.g. sshd, cron"></div></div>
+      <div class="small muted" style="margin:-6px 0 12px">Comma separated service names. A critical alert opens when one stops and resolves when it runs again.</div>
       <div class="field"><label>Alert webhook URL</label><input name="webhook_url" type="url" value="${esc(s.webhook_url)}" placeholder="https://hooks.slack.com/… or Discord / Teams / ntfy webhook"></div>
       <div class="row"><button class="btn primary">Save settings</button><button type="button" class="btn" data-action="test-webhook">Send test</button></div>
       <p class="small muted">Current agent versions: Windows <span class="mono">${cfg.agent_versions.windows}</span>, Linux <span class="mono">${cfg.agent_versions.linux}</span>. Agents self-update when these change.</p></form>` : ''}

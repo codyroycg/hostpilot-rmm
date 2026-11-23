@@ -1,6 +1,8 @@
 // HostPilot RMM terminal viewer (Linux devices)
 const $ = (s) => document.querySelector(s);
-const agentId = decodeURIComponent(location.hash.slice(1));
+// #<agent id>[/cmd|/powershell]
+const [agentId, shellName = ''] = decodeURIComponent(location.hash.slice(1)).split('/');
+const SHELL_LABEL = { cmd: 'Command Prompt', powershell: 'PowerShell' };
 const overlay = $('#t-overlay');
 let ws = null;
 let connected = false;
@@ -69,9 +71,11 @@ async function start() {
     const r0 = await fetch(`/api/agents/${encodeURIComponent(agentId)}`);
     if (!r0.ok) throw new Error(r0.status === 401 ? 'Please sign in to HostPilot first.' : 'Device not found.');
     const a = await r0.json();
+    const label = a.platform === 'windows' ? SHELL_LABEL[shellName] || 'PowerShell' : 'Terminal';
     $('#t-host').textContent = a.hostname;
-    document.title = `${a.hostname} · Terminal`;
-    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/terminal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    $('#t-kind').textContent = a.platform === 'windows' ? `${label} · SYSTEM · hidden from the user` : 'root shell';
+    document.title = `${a.hostname} · ${label}`;
+    const r = await fetch(`/api/agents/${encodeURIComponent(agentId)}/terminal`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shell: shellName || 'powershell' }) });
     const s = await r.json();
     if (!r.ok) throw new Error(s.error || 'Could not start terminal');
     connect(s);

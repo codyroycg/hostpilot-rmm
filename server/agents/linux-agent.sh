@@ -55,14 +55,37 @@ jesc() {
 
 b64() { base64 | tr -d '\n'; }
 
-cpu_pct() {
-  local a b
-  read -r _ u1 n1 s1 i1 w1 x1 y1 z1 _ < /proc/stat
-  sleep 1
-  read -r _ u2 n2 s2 i2 w2 x2 y2 z2 _ < /proc/stat
-  local t1=$((u1+n1+s1+i1+w1+x1+y1+z1)) t2=$((u2+n2+s2+i2+w2+x2+y2+z2))
-  local dt=$((t2-t1)) di=$(( (i2+w2) - (i1+w1) ))
-  if [ "$dt" -gt 0 ]; then echo $(( (100*(dt-di)) / dt )); else echo 0; fi
+# prints "<total %> <core0>,<core1>,..." from two /proc/stat samples one second apart
+cpu_stats() {
+  local s1 s2
+  s1="$(grep '^cpu' /proc/stat)"; sleep 1; s2="$(grep '^cpu' /proc/stat)"
+  printf '%s\n--\n%s\n' "$s1" "$s2" | awk '
+    $1 == "--" { second = 1; next }
+    { t = 0; for (i = 2; i <= 9; i++) t += $i; idle = $5 + $6
+      if (!second) { T[$1] = t; I[$1] = idle } else { dt = t - T[$1]; di = idle - I[$1]; P[$1] = dt > 0 ? int(100 * (dt - di) / dt) : 0; order[++n] = $1 } }
+    END { cores = ""; for (k = 1; k <= n; k++) if (order[k] != "cpu") cores = cores (cores == "" ? "" : ",") P[order[k]]; printf "%d %s\n", P["cpu"], cores }'
+}
+
+# desktop/laptop/server chassis number (SMBIOS) and whether this is a virtual machine
+chassis_type() { cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo 0; }
+is_virtual() {
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    case "$(systemd-detect-virt 2>/dev/null)" in none|"") echo false ;; *) echo true ;; esac
+  else
+    grep -qiE 'kvm|qemu|vmware|virtualbox|xen|hyper-v|bochs|proxmox' /sys/class/dmi/id/product_name /sys/class/dmi/id/sys_vendor 2>/dev/null && echo true || echo false
+  fi
+}
+
+# status of the services the server asked us to watch (WATCH_SERVICES, space separated)
+services_json() {
+  local out="" s st en
+  for s in $WATCH_SERVICES; do
+    st="$(systemctl is-active "$s" 2>/dev/null)"; en="$(systemctl is-enabled "$s" 2>/dev/null)"
+    if [ -z "$st" ] || { [ "$st" = inactive ] && [ -z "$en" ]; }; then st=missing; fi
+    case "$st" in active) st=running ;; inactive|failed) st=stopped ;; esac
+    out+="{\"name\":\"$(jesc "$s")\",\"display\":\"\",\"status\":\"$(jesc "$st")\",\"start\":\"$(jesc "$en")\"},"
+  done
+  printf '[%s]' "${out%,}"
 }
 
 # Network interfaces (incl. VPN/tunnel devices) + byte counters. Prints a JSON fragment:
@@ -152,8 +175,10 @@ checkin_body() {
   vendor="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)"
   model="$(cat /sys/class/dmi/id/product_name 2>/dev/null)"
   serial="$(cat /sys/class/dmi/id/product_serial 2>/dev/null)"
+  local cpu_total cpu_cores
+  read -r cpu_total cpu_cores <<< "$(cpu_stats)"
   cat > "$f" <<EOF
-{"hostname":"$(jesc "$(hostname)")","cpu":$(cpu_pct),"mem":${mem_pct:-0},"disks":[${disks%,}],"ip_addrs":[${ips%,}],
+{"hostname":"$(jesc "$(hostname)")","cpu":${cpu_total:-0},"core_load":[${cpu_cores}],"chassis":[$(chassis_type)],"is_virtual":$(is_virtual),"services":$(services_json),"mem":${mem_pct:-0},"disks":[${disks%,}],"ip_addrs":[${ips%,}],
 "logged_user":"$(jesc "$users")","os_name":"$(jesc "$os_name")","os_version":"$(jesc "$os_ver")","arch":"$(uname -m)",
 "cpu_model":"$(jesc "$cpu_model")","cpu_cores":${cores:-1},"ram_total":$(( ${mem_total:-0} * 1024 )),
 "manufacturer":"$(jesc "$vendor")","model":"$(jesc "$model")","serial":"$(jesc "$serial")",
@@ -295,7 +320,11 @@ while true; do
   now=$(date +%s)
   if [ $((now - last_checkin)) -ge "$interval" ]; then
     checkin_body "$body"
-    if api POST /api/agent/checkin "$body" 30 >/dev/null; then last_checkin=$(date +%s); fi
+    if cresp=$(api POST /api/agent/checkin "$body" 30); then
+      last_checkin=$(date +%s)
+      # services to watch: "watch_services":["sshd","nginx"] (names are validated server-side)
+      WATCH_SERVICES="$(printf '%s' "$cresp" | sed -n 's/.*"watch_services":\[\([^]]*\)\].*/\1/p' | tr -d '"' | tr ',' ' ')"
+    fi
     rm -f "$body"
   fi
 

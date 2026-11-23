@@ -8,7 +8,7 @@ import { buildTask } from './task-catalog.js';
 const sessions = new Map();
 const HOST_CONNECT_TIMEOUT = 60_000;
 
-export function createTerminalSession(agent, user) {
+export function createTerminalSession(agent, user, shell = 'bash') {
   const id = randHex(16);
   const s = {
     id, agent, user, viewerToken: randHex(24), hostToken: randHex(24),
@@ -19,13 +19,14 @@ export function createTerminalSession(agent, user) {
   const r = queueJobs({
     agents: [agent], name: 'Terminal session', task: 'terminal.open', createdBy: user.username, timeout: 12 * 3600,
     build: (a) => buildTask('terminal.open', a.platform, {
-      in: `/api/term/${id}/in?${q}`, out: `/api/term/${id}/out?${q}`, close: `/api/term/${id}/close?${q}`,
+      in: `/api/term/${id}/in?${q}`, out: `/api/term/${id}/out?${q}`, close: `/api/term/${id}/close?${q}`, shell,
     }, { allowInternal: true }),
   });
-  if (!r.created) { sessions.delete(id); throw new HttpError(400, 'Terminal sessions are available for Linux devices'); }
-  audit(user.username, 'terminal.start', agent.hostname);
+  if (!r.created) { sessions.delete(id); throw new HttpError(400, 'This device cannot open a terminal session'); }
+  audit(user.username, 'terminal.start', `${agent.hostname} (${shell})`);
   s.timer = setTimeout(() => {
-    if (!s.input) end(s, "The device didn't start the terminal. Check that it's online and has the 'script' command (util-linux).");
+    if (!s.input) end(s, agent.platform === 'windows' ? "The device didn't start the session. Check that it's online."
+      : "The device didn't start the terminal. Check that it's online and has the 'script' command (util-linux).");
   }, HOST_CONNECT_TIMEOUT);
   return { session: id, token: s.viewerToken };
 }

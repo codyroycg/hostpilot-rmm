@@ -49,6 +49,13 @@ function password(a, required) {
 }
 const base = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
 
+function regPath(v, allowEmpty = false) {
+  const p = S(v, 1000).trim().replace(/\//g, '\\');
+  if (!p && allowEmpty) return '';
+  if (!/^(HKLM|HKU|HKCR|HKCC|HKEY_LOCAL_MACHINE|HKEY_USERS|HKEY_CLASSES_ROOT|HKEY_CURRENT_CONFIG)(\\.*)?$/i.test(p) || /[\0\r\n\t]/.test(p)) throw new HttpError(400, 'Registry path must start with HKLM, HKU, HKCR or HKCC');
+  return p;
+}
+
 // ---------- firewall rule validation ----------
 const PORTS = /^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*$/;
 const ADDRS = /^[A-Za-z0-9:.\/-]+(,[A-Za-z0-9:.\/-]+)*$/;
@@ -173,6 +180,33 @@ export const TASKS = {
   },
   'fw.delete': { title: (a) => `Delete firewall rule ${a.id}`, timeout: 120, wait: 60, args: (a) => ({ id: fwId(a) }) },
 
+  'proc.list': { title: () => 'List processes', timeout: 120, wait: 60, args: () => ({}) },
+  'proc.kill': {
+    title: (a) => `End process ${a.pid}`, timeout: 60, wait: 45,
+    args: (a) => { const pid = Number(a.pid); if (!Number.isInteger(pid) || pid <= 4) throw new HttpError(400, 'Invalid process ID'); return { pid: String(pid), tree: flag(a.tree) || '0' }; },
+  },
+  'svc.list': { title: () => 'List services', timeout: 120, wait: 60, args: () => ({}) },
+  'svc.control': {
+    title: (a) => `Service ${a.name}: ${a.action}`, timeout: 120, wait: 90,
+    args: (a) => {
+      const name = need(S(a.name, 200).trim(), 'Service');
+      if (!/^[\w.@:+ -]{1,200}$/.test(name)) throw new HttpError(400, 'Invalid service name');
+      return { name, action: oneOf(S(a.action), ['start', 'stop', 'restart', 'auto', 'manual', 'disabled'], 'action') };
+    },
+  },
+  'reg.list': { title: (a) => `Registry: ${a.path || 'roots'}`, timeout: 60, wait: 45, args: (a) => ({ path: regPath(a.path, true) }) },
+  'reg.set': {
+    title: (a) => `Set registry value ${a.path}\\${a.name}`, timeout: 60, wait: 45,
+    args: (a) => ({ path: regPath(a.path), name: S(a.name, 255), type: oneOf(S(a.type), ['String', 'ExpandString', 'MultiString', 'DWord', 'QWord', 'Binary'], 'type'), data: S(a.data, 100000) }),
+  },
+  'reg.delete': {
+    title: (a) => (a.what === 'key' ? `Delete registry key ${a.path}` : `Delete registry value ${a.path}\\${a.name}`), timeout: 120, wait: 60,
+    args: (a) => ({ path: regPath(a.path), what: a.what === 'key' ? 'key' : 'value', name: S(a.name, 255) }),
+  },
+  'reg.newkey': {
+    title: (a) => `New registry key ${a.path}\\${a.name}`, timeout: 60, wait: 45,
+    args: (a) => { const name = need(S(a.name, 255).trim(), 'Key name'); if (/[\\]/.test(name)) throw new HttpError(400, 'Key name cannot contain \\'); return { path: regPath(a.path), name }; },
+  },
   'net.scan': {
     internal: true, title: (a) => `Network discovery ${a.subnet}`, timeout: 900,
     args: (a) => {
@@ -182,7 +216,10 @@ export const TASKS = {
     },
   },
   'metrics.live': { internal: true, title: () => 'Live performance monitor', timeout: 3600, args: (a) => ({ url: S(a.url) }) },
-  'terminal.open': { internal: true, title: () => 'Terminal session', timeout: 12 * 3600, args: (a) => ({ in: S(a.in), out: S(a.out), close: S(a.close) }) },
+  'terminal.open': {
+    internal: true, title: (a) => ({ powershell: 'PowerShell session', cmd: 'Command Prompt session' }[a.shell] || 'Terminal session'), timeout: 12 * 3600,
+    args: (a) => ({ in: S(a.in), out: S(a.out), close: S(a.close), shell: ['cmd', 'powershell'].includes(a.shell) ? a.shell : 'bash' }),
+  },
 };
 
 export function getTask(task, { allowInternal = false } = {}) {
