@@ -10,7 +10,8 @@ const state = { user: null, timers: [], selected: new Set(), terminal: new Map()
 class ApiError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 
 async function api(method, path, body) {
-  const opts = { method, headers: {} };
+  // X-HostPilot marks the request as coming from this console (CSRF check), including body-less POSTs.
+  const opts = { method, headers: { 'X-HostPilot': '1' } };
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
   const data = await r.json().catch(() => ({}));

@@ -61,7 +61,8 @@ const server = http.createServer(async (req, res) => {
     // CSRF defence for cookie-authenticated mutations: JSON bodies, or a custom header on raw uploads
     // (neither can be sent cross-site without a CORS preflight, which we never grant).
     if (ctx.user && req.method !== 'GET') {
-      if (m.opts.raw ? req.headers['x-hostpilot'] !== '1' : !String(req.headers['content-type'] || '').includes('application/json')) {
+      const marked = req.headers['x-hostpilot'] === '1';
+      if (m.opts.raw ? !marked : !marked && !String(req.headers['content-type'] || '').includes('application/json')) {
         throw new HttpError(415, 'Expected application/json');
       }
     }
