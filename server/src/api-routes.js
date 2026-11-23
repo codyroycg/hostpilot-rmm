@@ -683,6 +683,28 @@ route('GET', '/api/patching', (ctx) => {
   });
 });
 
+// ---------- forced agent update ----------
+
+function queueAgentUpdate(u, agents) {
+  const r = queueJobs({ agents, name: 'Update agent', shell: '_update', body: '', timeout: 300, createdBy: u.username });
+  audit(u.username, 'agent.update', agents.length === 1 ? agents[0].hostname : `${r.created} devices`);
+  return r;
+}
+
+route('POST', '/api/agents/:id/update-agent', (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  return queueAgentUpdate(u, [a]);
+});
+
+route('POST', '/api/agents/update-agent', (ctx) => {
+  const u = need(ctx, 'tech');
+  const ids = Array.isArray(ctx.body.agent_ids) ? ctx.body.agent_ids.slice(0, 5000).map(String) : [];
+  const agents = ids.map((id) => get('SELECT id, hostname, platform FROM agents WHERE id=?', id)).filter(Boolean);
+  if (!agents.length) throw new HttpError(400, 'No devices selected');
+  return queueAgentUpdate(u, agents);
+});
+
 // ---------- live performance (1-minute chart) ----------
 
 route('POST', '/api/agents/:id/live', (ctx) => {

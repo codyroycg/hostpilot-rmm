@@ -134,6 +134,7 @@ export const SETTING_DEFAULTS = {
   job_retention_days: 30,
   webhook_url: '',
   update_scan_hours: 24,
+  tray_icon: 1, // 1 = show the HostPilot status icon in the Windows taskbar
 };
 
 export function getSettings() {

@@ -4,6 +4,24 @@
 
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$BASE/agent.sh"
+
+# Commands for use on the device:
+#   sudo /opt/hostpilot/agent.sh --update   ask the running agent to download the latest version and restart
+#   sudo /opt/hostpilot/agent.sh --status   show whether the agent is connected
+case "$1" in
+  --update)
+    touch "$BASE/update-now" || exit 1
+    echo "Update requested. The agent will download the latest version and restart within about 30 seconds."
+    exit 0 ;;
+  --status)
+    if ! systemctl is-active --quiet hostpilot-agent 2>/dev/null; then echo "HostPilot agent: not running"; exit 3; fi
+    if [ -r "$BASE/status" ]; then
+      read -r st ts msg < "$BASE/status"
+      echo "HostPilot agent: $st (last contact $(( $(date +%s) - ${ts:-0} ))s ago)${msg:+ - $msg}"
+    else echo "HostPilot agent: running"; fi
+    exit 0 ;;
+esac
+
 # shellcheck disable=SC1091
 source "$BASE/config.env"
 SERVER="${SERVER%/}"
@@ -199,6 +217,7 @@ start_job() { # id shell timeout base64body
       if command -v python3 >/dev/null 2>&1; then cmd=(python3 "$stem.script")
       else rm -f "$stem.script"; post_message "$id" 127 "python3 is not installed on this device"; return; fi ;;
     _uninstall) uninstall "$id" ;;
+    _update) rm -f "$stem.script"; force_update "$id"; return ;;
     *) rm -f "$stem.script"; post_message "$id" 127 "Shell '$shell' is not supported on Linux"; return ;;
   esac
   (
@@ -240,6 +259,31 @@ self_update() {
   fi
 }
 
+# forced update (web console or "agent.sh --update"): re-download even if the version looks current
+force_update() { # [job_id]
+  local tmp="$SELF.new" new
+  rm -f "$BASE/update-now"
+  log "forced update requested${1:+ (job $1)}"
+  if curl -sS --fail --max-time 60 -o "$tmp" "$SERVER/agent/linux.sh" && [ -s "$tmp" ]; then
+    new="$(sha256sum "$tmp" | cut -c1-12)"
+    [ -n "$1" ] && post_message "$1" 0 "Updating agent $MY_VERSION -> $new and restarting. The device reconnects within a minute."
+    chmod 700 "$tmp"; mv -f "$tmp" "$SELF"
+    log "forced update $MY_VERSION -> $new, restarting"
+    exit 0 # systemd restarts the service
+  fi
+  rm -f "$tmp"
+  log "forced update failed (download)"
+  [ -n "$1" ] && post_message "$1" 1 "Update failed: could not download the agent from $SERVER"
+  return 0
+}
+
+# status for "agent.sh --status": state, last-contact epoch, message
+last_contact=0
+set_status() {
+  [ "$1" = connected ] && last_contact=$(date +%s)
+  printf '%s %s %s\n' "$1" "$last_contact" "$2" > "$BASE/status" 2>/dev/null
+}
+
 log "agent $MY_VERSION starting (server $SERVER)"
 interval=60
 last_checkin=0
@@ -247,6 +291,7 @@ failures=0
 body="$JOBDIR/.checkin.json"
 
 while true; do
+  [ -e "$BASE/update-now" ] && force_update
   now=$(date +%s)
   if [ $((now - last_checkin)) -ge "$interval" ]; then
     checkin_body "$body"
@@ -263,6 +308,7 @@ while true; do
 
   if resp=$(api GET "/api/agent/poll?wait=$wait_s&format=text" "" $((wait_s + 30))); then
     failures=0
+    set_status connected
     want_inv=0; srv_version=""
     while IFS=$'\t' read -r kind a b c d; do
       case "$kind" in
@@ -278,6 +324,7 @@ while true; do
   else
     failures=$((failures + 1))
     log "poll failed (attempt $failures)"
+    set_status disconnected "can't reach $SERVER"
     check_jobs
     s=$((failures * 5)); [ "$s" -gt 60 ] && s=60
     sleep "$s"

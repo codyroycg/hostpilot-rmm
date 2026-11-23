@@ -25,6 +25,7 @@ export const AGENT_FILES = {
   'runner.ps1': loadFile('windows-runner.ps1', false),
   'remote.ps1': loadFile('windows-remote.ps1', false),
   'linux.sh': loadFile('linux-agent.sh', true),
+  'tray.exe': loadFile('HostPilotTray.exe', false),
 };
 const INSTALLERS = {
   windows: fs.readFileSync(path.join(AGENT_DIR, 'windows-install.ps1'), 'utf8'),
@@ -204,7 +205,9 @@ route('GET', '/api/agent/poll', async (ctx) => {
     }
     return sendText(ctx.res, 200, lines.join('\n') + '\n');
   }
-  return { jobs, want_inventory: wantInv, version, checkin_seconds: s.checkin_seconds };
+  // tray_version '' tells Windows agents to remove the taskbar icon
+  const trayVersion = s.tray_icon ? AGENT_FILES['tray.exe'].version : '';
+  return { jobs, want_inventory: wantInv, version, tray_version: trayVersion, checkin_seconds: s.checkin_seconds };
 });
 
 route('POST', '/api/agent/result', (ctx) => {

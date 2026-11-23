@@ -289,7 +289,8 @@ async function pageDevices(view) {
       <div class="row">
         ${can('tech') ? `<select id="bulk-sel" style="width:auto" disabled><option value="">More actions…</option>
           <option value="scan">Scan for OS updates</option><option value="patch">Install all OS updates</option>
-          <option value="patch-reboot">Install all OS updates + reboot if required</option><option value="software">Install software…</option></select>
+          <option value="patch-reboot">Install all OS updates + reboot if required</option><option value="software">Install software…</option>
+          <option value="agent-update">Update HostPilot agent now</option></select>
           <button class="btn primary" data-action="run-selected" id="run-sel" disabled>Run script on selected</button>` : ''}
         <a class="btn" href="#/clients">+ Add devices</a></div></div>
     <div class="toolbar">
@@ -361,6 +362,13 @@ async function pageDevices(view) {
     const ids = [...state.selected];
     if (!op || !ids.length) return;
     if (op === 'software') { await bulkSoftwareModal(ids); return; }
+    if (op === 'agent-update') {
+      if (!await confirmDialog(`Update the HostPilot agent on ${ids.length} device(s)? Each agent downloads the latest version and restarts (running jobs are abandoned).`, { okLabel: 'Update' })) return;
+      const r = await api('POST', '/api/agents/update-agent', { agent_ids: ids });
+      toast(`Agent update queued on ${r.created} device(s)`);
+      location.hash = `#/jobs/batch/${r.batch_id}`;
+      return;
+    }
     const label = { scan: 'Scan for OS updates', patch: 'Install all OS updates', 'patch-reboot': 'Install all OS updates and reboot where required' }[op];
     if (!await confirmDialog(`${label} on ${ids.length} device(s)?`, { okLabel: 'Go' })) return;
     const r = await api('POST', '/api/tasks', op === 'scan'
@@ -993,6 +1001,11 @@ async function devSettings(el, a) {
       <div class="field"><label>Notes</label><textarea name="notes" rows="5">${esc(a.notes)}</textarea></div>
       <div class="field"><label class="check"><input type="checkbox" name="maintenance" ${a.maintenance ? 'checked' : ''}> Maintenance mode (suppress alerts)</label></div>
       <button class="btn primary">Save</button></form>
+    <div class="card"><h2>Agent</h2>
+      <p class="small muted">Installed version <span class="mono">${esc(a.agent_version) || '—'}</span>${a.update_pending ? ' · a newer version is available (it installs automatically)' : ' · up to date'}.
+      "Update agent now" makes the agent download the latest version${a.platform === 'windows' ? ', runner and taskbar icon' : ''} and restart, even if it looks up to date.
+      ${a.online ? '' : 'The device is offline, so the update runs when it reconnects.'}</p>
+      <button class="btn" data-action="update-agent" data-id="${a.id}">Update agent now</button></div>
     ${can('admin') ? `<div class="card"><h2>Danger zone</h2>
       <p class="small muted">Uninstall removes the agent from the host the next time it checks in, then you can remove the device record.</p>
       <div class="row"><button class="btn danger" data-action="uninstall-agent" data-id="${a.id}">Uninstall agent</button>
@@ -1362,6 +1375,9 @@ async function pageSettings(view) {
     ${admin ? `<form class="card" id="set-form"><h2>Monitoring & alerting</h2>
       <div class="form-grid">${num('cpu_threshold', 'CPU alert %', '3-check average; 0 disables')}${num('mem_threshold', 'Memory alert %')}${num('disk_threshold', 'Disk alert %')}${num('offline_minutes', 'Offline alert after (min)')}</div>
       <div class="form-grid">${num('checkin_seconds', 'Agent check-in (sec)')}${num('inventory_hours', 'Inventory refresh (hours)')}${num('update_scan_hours', 'OS update scan (hours)', '0 disables automatic scans')}${num('metric_retention_days', 'Keep metrics (days)')}${num('job_retention_days', 'Keep job output (days)')}</div>
+      <div class="field"><label>Windows taskbar icon</label><select name="tray_icon" style="width:auto">
+        <option value="1" ${s.tray_icon ? 'selected' : ''}>Show the HostPilot status icon to logged-in users</option>
+        <option value="0" ${s.tray_icon ? '' : 'selected'}>Hidden (removed from devices on their next check-in)</option></select></div>
       <div class="field"><label>Alert webhook URL</label><input name="webhook_url" type="url" value="${esc(s.webhook_url)}" placeholder="https://hooks.slack.com/… or Discord / Teams / ntfy webhook"></div>
       <div class="row"><button class="btn primary">Save settings</button><button type="button" class="btn" data-action="test-webhook">Send test</button></div>
       <p class="small muted">Current agent versions: Windows <span class="mono">${cfg.agent_versions.windows}</span>, Linux <span class="mono">${cfg.agent_versions.linux}</span>. Agents self-update when these change.</p></form>` : ''}
@@ -1506,6 +1522,11 @@ const ACTIONS = {
       if (r.created) location.hash = `#/jobs/batch/${r.batch_id}`;
     }).catch((e) => toast(e.message, 'error'));
   }),
+  'update-agent': async (el) => {
+    const r = await api('POST', `/api/agents/${el.dataset.id}/update-agent`);
+    toast('Agent update queued. The device restarts its agent and reconnects within a minute.');
+    if (r.jobs?.[0]) openJobModal(r.jobs[0].id);
+  },
   'refresh-inv': async (el) => { await api('POST', `/api/agents/${el.dataset.id}/inventory`); toast('Inventory refresh requested'); },
   'cancel-job': async (el) => { await api('POST', `/api/jobs/${el.dataset.id}/cancel`); toast('Job cancelled'); },
   alert: async (el) => { await api('POST', `/api/alerts/${el.dataset.id}/${el.dataset.op}`); updateAlertBadge(); router(); },

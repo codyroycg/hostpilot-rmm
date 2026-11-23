@@ -28,7 +28,8 @@ A self-hosted remote monitoring & management (RMM) platform for MSPs and IT team
 - **Alerting**: CPU, memory, and disk thresholds plus offline detection, with auto-resolve, acknowledge, maintenance mode, and webhook notifications (Slack, Discord, Teams, ntfy…).
 - **Fleet software search**: for example, "which machines have OpenSSL 1.1?"
 - **Users & roles**: `admin`, `tech` (can run scripts), and `viewer` (read-only). Includes a full audit log.
-- **Agent self-update**: change an agent script on the server and every agent updates itself on its next poll.
+- **Agent self-update**: change an agent script on the server and every agent updates itself on its next poll. You can also force an update from the web console (device **Settings → Update agent now**, or **More actions → Update HostPilot agent now** for many devices) or from the device itself (see below).
+- **Windows taskbar icon**: logged-in users see a HostPilot icon showing whether the agent is connected (green), disconnected (red), not running (grey) or updating (blue). Its menu has **Update agent now**. Turn it off under **Settings → Windows taskbar icon**.
 - **Agent uninstall** from the console.
 
 ## Quick start
@@ -122,18 +123,33 @@ The agent runs `script -qfc "bash -l"` to get a real pseudo-terminal. Keystrokes
 
 `server/agents/HostPilotSetup.exe` is a small, generic .NET Framework 4 program built from `setup/HostPilotSetup.cs`. When someone downloads it, the server appends that client's server URL and enrollment token to the file, so the same binary serves every client. Rebuild it on any Windows machine with `powershell -File setup\build.ps1`; it uses the C# compiler that ships with Windows. It isn't code-signed, so Windows SmartScreen shows "Windows protected your PC" the first time. To remove the warning, sign it with your own code-signing certificate (`signtool sign`). Appending data to a signed exe can break signature validation on strictly configured machines (for example with `EnableCertPaddingCheck`). If you sign, test it, or sign each downloaded per-client exe instead of the stub.
 
+### Taskbar icon and updating from the device
+
+On Windows, the agent installs `C:\Program Files\HostPilot\HostPilotTray.exe` and a logon task (`HostPilotTray`, group *Users*) so the icon starts in every user's session. The agent (SYSTEM) publishes its state in `HKLM\SOFTWARE\HostPilot`, which the icon reads. **Update agent now** signals the event `Global\HostPilotUpdateNow`. Any signed-in user may signal it, but it only makes the agent re-download itself from your server. The tray app is built from `setup/HostPilotTray.cs` by `setup\build.ps1`.
+
+Force an update on the device:
+
+| | Command |
+|---|---|
+| Windows, any user | `"C:\Program Files\HostPilot\HostPilotTray.exe" /update`, or right-click the tray icon → **Update agent now** |
+| Windows, elevated | `powershell -ExecutionPolicy Bypass -File C:\ProgramData\HostPilot\agent.ps1 -Update` |
+| Linux | `sudo /opt/hostpilot/agent.sh --update` (and `--status` to check the connection) |
+
+The agent picks the request up within about 30 seconds, downloads the latest version from the server, and restarts.
+
 ### Files on the endpoints
 
 | | Windows | Linux |
 |---|---|---|
 | Install dir | `C:\ProgramData\HostPilot` (SYSTEM + Administrators only) | `/opt/hostpilot` (root, 0700) |
 | Service | Scheduled task `HostPilotAgent` → `runner.ps1` → `agent.ps1` | `hostpilot-agent.service` |
+| Tray icon | `C:\Program Files\HostPilot\HostPilotTray.exe`, task `HostPilotTray` | — |
 | Log | `agent.log` | `agent.log` |
 
 Manual removal (if the server is gone):
 
 ```powershell
-Unregister-ScheduledTask HostPilotAgent -Confirm:$false; Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | ? CommandLine -like '*HostPilot*' | Invoke-CimMethod -MethodName Terminate; Remove-Item C:\ProgramData\HostPilot -Recurse -Force
+Unregister-ScheduledTask HostPilotAgent -Confirm:$false; Unregister-ScheduledTask HostPilotTray -Confirm:$false -ErrorAction SilentlyContinue; Get-Process HostPilotTray -ErrorAction SilentlyContinue | Stop-Process -Force; Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | ? CommandLine -like '*HostPilot*' | Invoke-CimMethod -MethodName Terminate; Remove-Item C:\ProgramData\HostPilot, 'C:\Program Files\HostPilot', HKLM:\SOFTWARE\HostPilot -Recurse -Force -ErrorAction SilentlyContinue
 ```
 ```bash
 sudo systemctl disable --now hostpilot-agent; sudo rm -rf /opt/hostpilot /etc/systemd/system/hostpilot-agent.service; sudo systemctl daemon-reload

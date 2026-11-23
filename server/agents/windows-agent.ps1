@@ -1,6 +1,23 @@
 # HostPilot RMM agent for Windows (PowerShell 5.1+)
 # Runs as SYSTEM under runner.ps1 (scheduled task "HostPilotAgent").
 # Config lives next to this file in config.json: { server, agent_id, secret }
+#
+# Ask the running agent to update itself now (from an elevated prompt on the device):
+#   powershell -ExecutionPolicy Bypass -File "C:\ProgramData\HostPilot\agent.ps1" -Update
+# Any user can do the same with:  "C:\Program Files\HostPilot\HostPilotTray.exe" /update
+param([switch]$Update)
+
+if ($Update) {
+    try {
+        $ev = [Threading.EventWaitHandle]::OpenExisting('Global\HostPilotUpdateNow')
+        [void]$ev.Set()
+        Write-Output 'Update requested. The agent will download the latest version and restart within about 30 seconds.'
+        exit 0
+    } catch {
+        Write-Output "The HostPilot agent isn't running (or isn't reachable): $($_.Exception.Message)"
+        exit 1
+    }
+}
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -283,9 +300,15 @@ function Start-AgentJob($Job) {
 
     if ($Job.shell -eq '_remote') { Start-RemoteSession $Job; return }
 
+    if ($Job.shell -eq '_update') { Update-Forced 'web console' $id; return }
+
     if ($Job.shell -eq '_uninstall') {
         Send-Result $id 0 'Agent uninstall scheduled' '' $false
         Write-Log 'uninstall requested by server'
+        if ($IsSystem) {
+            try { Remove-Tray } catch {}
+            Remove-Item -Path $StatusKey -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Set-Content -LiteralPath (Join-Path $Base 'uninstall.flag') -Value '1'
         exit 0
     }
@@ -361,15 +384,127 @@ function Update-Jobs {
     }
 }
 
+function Get-ShortHash([string]$Path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.Substring(0, 12).ToLower() }
+
 function Update-Self([string]$Version) {
     if ($Running.Count -gt 0) { return }
     $tmp = "$SelfPath.new"
     Invoke-WebRequest -Uri "$Server/agent/windows.ps1" -OutFile $tmp -UseBasicParsing -TimeoutSec 60
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.Substring(0, 12).ToLower()
+    $hash = Get-ShortHash $tmp
     if ($hash -ne $Version) { Remove-Item $tmp -Force; Write-Log "update hash mismatch ($hash != $Version)"; return }
     Move-Item -LiteralPath $tmp -Destination $SelfPath -Force
     Write-Log "updated agent $MyVersion -> $Version, restarting"
     exit 0
+}
+
+# Forced update (web console, tray icon or "agent.ps1 -Update"): re-download the agent, runner and tray
+# icon even if the version looks current, then restart. Running jobs are abandoned.
+function Update-Forced([string]$Reason, $JobId = $null) {
+    Write-Log "forced update requested ($Reason)"
+    Set-AgentStatus 'connected' 'Updating'
+    $tmp = "$SelfPath.new"
+    $runner = Join-Path $Base 'runner.ps1'
+    try {
+        Invoke-WebRequest -Uri "$Server/agent/windows.ps1" -OutFile $tmp -UseBasicParsing -TimeoutSec 60
+        Invoke-WebRequest -Uri "$Server/agent/runner.ps1" -OutFile "$runner.new" -UseBasicParsing -TimeoutSec 60
+        $new = Get-ShortHash $tmp
+        if ($JobId) { Send-Result $JobId 0 "Updating agent $MyVersion -> $new and restarting. The device reconnects within a minute." '' $false }
+        Move-Item -LiteralPath "$runner.new" -Destination $runner -Force
+        Move-Item -LiteralPath $tmp -Destination $SelfPath -Force
+        $script:TrayVersionSeen = $null
+        try { if ($script:TrayVersion) { Install-Tray $script:TrayVersion -Force } } catch { Write-Log "tray reinstall failed: $($_.Exception.Message)" }
+        Write-Log "forced update $MyVersion -> $new, restarting"
+        exit 0
+    } catch {
+        Remove-Item -LiteralPath $tmp, "$runner.new" -Force -ErrorAction SilentlyContinue
+        Write-Log "forced update failed: $($_.Exception.Message)"
+        if ($JobId) { try { Send-Result $JobId 1 '' "Update failed: $($_.Exception.Message)" $false } catch {} }
+    }
+}
+
+# ---------------- status for the tray icon ----------------
+# HKLM\SOFTWARE\HostPilot is readable by every user; the tray icon (HostPilotTray.exe) shows it.
+
+$IsSystem = [Security.Principal.WindowsIdentity]::GetCurrent().IsSystem
+$StatusKey = 'HKLM:\SOFTWARE\HostPilot'
+$script:LastContact = 0
+
+function Set-AgentStatus([string]$State, [string]$Message = '') {
+    if (-not $IsSystem) { return }
+    try {
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        if ($State -eq 'connected') { $script:LastContact = $now }
+        if (-not (Test-Path $StatusKey)) { New-Item -Path $StatusKey -Force | Out-Null }
+        $vals = @{ State = $State; Message = $Message; Heartbeat = [string]$now; LastContact = [string]$script:LastContact; Server = $Server; Version = $MyVersion }
+        foreach ($k in $vals.Keys) { Set-ItemProperty -Path $StatusKey -Name $k -Value $vals[$k] -Type String }
+    } catch {}
+}
+
+# Named event the tray icon / "agent.ps1 -Update" signal to request an update. Authenticated users may
+# signal it (Synchronize|Modify) but nothing else.
+$UpdateEvent = $null
+try {
+    $sec = New-Object Security.AccessControl.EventWaitHandleSecurity
+    $sid = { param($s) New-Object Security.Principal.SecurityIdentifier $s }
+    $sec.AddAccessRule((New-Object Security.AccessControl.EventWaitHandleAccessRule((& $sid 'S-1-5-18'), 'FullControl', 'Allow')))
+    $sec.AddAccessRule((New-Object Security.AccessControl.EventWaitHandleAccessRule((& $sid 'S-1-5-32-544'), 'FullControl', 'Allow')))
+    $sec.AddAccessRule((New-Object Security.AccessControl.EventWaitHandleAccessRule((& $sid 'S-1-5-11'), 'Synchronize, Modify', 'Allow')))
+    $created = $false
+    $UpdateEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::AutoReset, 'Global\HostPilotUpdateNow', [ref]$created, $sec)
+} catch { Write-Log "update request event unavailable: $($_.Exception.Message)" }
+
+# ---------------- tray icon ----------------
+
+$TrayDir = Join-Path $env:ProgramFiles 'HostPilot'
+$TrayExe = Join-Path $TrayDir 'HostPilotTray.exe'
+$script:TrayVersion = $null
+$script:TrayVersionSeen = $null
+
+function Remove-Tray {
+    Unregister-ScheduledTask -TaskName 'HostPilotTray' -Confirm:$false -ErrorAction SilentlyContinue
+    Get-Process -Name HostPilotTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+    Remove-Item -LiteralPath $TrayDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Installs/updates HostPilotTray.exe and a logon task (group "Users", so it runs in every user's session).
+function Install-Tray([string]$Version, [switch]$Force) {
+    if (-not $IsSystem) { return }
+    if (-not $Version) { if (Test-Path -LiteralPath $TrayExe) { Remove-Tray; Write-Log 'tray icon removed (disabled on server)' }; return }
+    $changed = $false
+    $cur = if (Test-Path -LiteralPath $TrayExe) { Get-ShortHash $TrayExe } else { '' }
+    if ($Force -or $cur -ne $Version) {
+        New-Item -ItemType Directory -Force -Path $TrayDir | Out-Null
+        $tmp = "$TrayExe.new"
+        Invoke-WebRequest -Uri "$Server/agent/tray.exe" -OutFile $tmp -UseBasicParsing -TimeoutSec 60
+        $h = Get-ShortHash $tmp
+        if ($h -ne $Version) { Remove-Item -LiteralPath $tmp -Force; Write-Log "tray hash mismatch ($h != $Version)"; return }
+        if ($h -ne $cur) {
+            Get-Process -Name HostPilotTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 500
+            Remove-Item -LiteralPath "$TrayExe.old" -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $TrayExe) {
+                try { Remove-Item -LiteralPath $TrayExe -Force } catch { Move-Item -LiteralPath $TrayExe -Destination "$TrayExe.old" -Force }
+            }
+            Move-Item -LiteralPath $tmp -Destination $TrayExe -Force
+            $changed = $true
+            Write-Log "tray icon installed ($h)"
+        } else { Remove-Item -LiteralPath $tmp -Force }
+    }
+    if (-not (Get-ScheduledTask -TaskName 'HostPilotTray' -ErrorAction SilentlyContinue)) {
+        $action = New-ScheduledTaskAction -Execute $TrayExe
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel
+        Register-ScheduledTask -TaskName 'HostPilotTray' -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+            -Description 'HostPilot agent status icon' -Force | Out-Null
+        $changed = $true
+    }
+    # start it in the sessions of users who are already logged on (the exe exits if already running)
+    if ($changed -or -not $script:TrayStarted) {
+        Start-ScheduledTask -TaskName 'HostPilotTray' -ErrorAction SilentlyContinue
+        $script:TrayStarted = $true
+    }
 }
 
 # ---------------- main loop ----------------
@@ -381,6 +516,7 @@ $failures = 0
 
 while ($true) {
     try {
+        if ($UpdateEvent -and $UpdateEvent.WaitOne(0)) { Update-Forced 'requested on this computer' }
         if (((Get-Date) - $lastCheckin).TotalSeconds -ge $interval) {
             $resp = Invoke-Api POST '/api/agent/checkin' (Get-Metrics) 30
             $lastCheckin = Get-Date
@@ -397,13 +533,22 @@ while ($true) {
         if ($poll.jobs) { foreach ($j in @($poll.jobs)) { Start-AgentJob $j } }
         Update-Jobs
         if ($poll.want_inventory) { Send-Inventory }
-        if ($poll.version -and $poll.version -ne $MyVersion) { Update-Self ([string]$poll.version) }
         $failures = 0
+        Set-AgentStatus 'connected'
+        if ($null -ne $poll.tray_version) {
+            $script:TrayVersion = [string]$poll.tray_version
+            if ($script:TrayVersion -ne $script:TrayVersionSeen) {
+                $script:TrayVersionSeen = $script:TrayVersion
+                try { Install-Tray $script:TrayVersion } catch { Write-Log "tray install failed: $($_.Exception.Message)" }
+            }
+        }
+        if ($poll.version -and $poll.version -ne $MyVersion) { Update-Self ([string]$poll.version) }
     } catch {
         $failures++
         $status = $null
         try { $status = [int]$_.Exception.Response.StatusCode } catch {}
         Write-Log "error ($status): $($_.Exception.Message)"
+        Set-AgentStatus 'disconnected' $(if ($status) { "Server answered HTTP $status" } else { $_.Exception.Message })
         try { Update-Jobs } catch {}
         if ($status -eq 401) { Start-Sleep -Seconds 300 }
         else { Start-Sleep -Seconds ([Math]::Min(60, 5 * $failures)) }
