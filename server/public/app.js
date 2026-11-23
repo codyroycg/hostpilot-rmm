@@ -292,97 +292,220 @@ const wKpi = (title, value, icon, cls, href) => `<a class="wcard wkpi ${cls}" hr
 const ICON_DEV = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/></svg>';
 const ICON_WARN = '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2 22 12 12 22 2 12z" fill="#e53b2f"/><path d="M12 7v6M12 16.5v.5" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>';
 
-async function pageDashboard(view) {
-  const draw = async () => {
-    const d = await api('GET', '/api/dashboard');
-    const t = d.totals, r = d.resources, p = d.patching, n = d.network, h = d.health;
-    const failed = (d.jobs_24h.failed || 0) + (d.jobs_24h.timeout || 0) + (d.jobs_24h.lost || 0);
-    const jobsTotal = Object.values(d.jobs_24h).reduce((a, b) => a + b, 0);
-    if (t.devices === 0) {
-      view.innerHTML = `<div class="page-head"><h1>Dashboard</h1></div><div class="card"><h2>Get started</h2>
-        <p>1. Create a <a href="#/clients">client</a>. 2. On the client page, download the installer (Setup.exe or .sh) or copy the one-line command. 3. Run it on your Windows or Linux hosts. They appear here within a minute.</p></div>`;
-      return;
-    }
-    const trendRows = d.trend.map((x) => ({ ts: x.ts + 1800000, cpu: x.cpu, mem: x.mem, devices: pct(x.devices, t.devices), net: x.net }));
-    const sv = d.servers, ws = d.workstations;
-    const osColors = [WC.blue, WC.pink, WC.teal, WC.amber, WC.purple, WC.gray];
-    const shortOs = (s) => s.replace(/^Microsoft /, '').replace(/ (Standard|Datacenter|Enterprise|Professional)\b.*$/, '').replace(/ GNU\/Linux/, '').replace(/ LTS$/, '');
-    const osParts = d.os.slice(0, 5).map((o, i) => [o.n, osColors[i], shortOs(o.name)]);
-    const otherOs = d.os.slice(5).reduce((s, o) => s + o.n, 0);
-    if (otherOs) osParts.push([otherOs, WC.gray, 'Other']);
-    const reboot = [[sv.uptime.d30, WC.blue, 'Servers > 30 days'], [sv.uptime.d60, WC.pink, 'Servers > 60 days'], [sv.uptime.d90, WC.teal, 'Servers > 90 days'],
-      [ws.uptime.d30, WC.purple, 'Workstations > 30 days'], [ws.uptime.d60, WC.olive, 'Workstations > 60 days'], [ws.uptime.d90, WC.orange, 'Workstations > 90 days']];
-    const patchParts = [[p.devices_security, WC.red, 'Security'], [p.devices_pending - p.devices_security, WC.amber, 'Pending'],
-      [p.reboot_required, WC.blue, 'Reboot'], [p.never_scanned, WC.gray, 'Not scanned'], [p.up_to_date, WC.green, 'Up to date']];
-    const resParts = [[r.high_cpu, WC.red, 'High CPU'], [r.high_mem, WC.amber, 'High memory'], [r.low_disk, WC.orange, 'Low disk'],
-      [Math.max(0, t.online - Math.max(r.high_cpu, r.high_mem, 0)), WC.green, 'Normal']];
-    const agentParts = [[d.agents.outdated, WC.amber, 'Updating'], [d.agents.offline, WC.gray, 'Offline'], [d.agents.current, WC.green, 'Up to date']];
-    const jobParts = [[d.jobs_24h.failed || 0, WC.red, 'Failed'], [d.jobs_24h.timeout || 0, WC.amber, 'Timed out'],
-      [(d.jobs_24h.running || 0) + (d.jobs_24h.queued || 0), WC.blue, 'Running'], [d.jobs_24h.lost || 0, WC.gray, 'Lost'], [d.jobs_24h.success || 0, WC.green, 'Succeeded']];
-    const clientParts = [[d.clients.filter((c) => c.alerts).length, WC.red, 'With alerts'], [d.clients.filter((c) => !c.alerts && c.patches).length, WC.amber, 'Need patches'],
-      [d.clients.filter((c) => !c.alerts && !c.patches && c.devices).length, WC.green, 'Healthy'], [d.clients.filter((c) => !c.devices).length, WC.gray, 'No devices']];
-
-    view.innerHTML = `
-      <div class="page-head"><h1>Dashboard: Monitoring</h1><span class="small muted">Updated ${new Date(d.generated_at).toLocaleTimeString()} · refreshes every 15 s</span></div>
-
-      <div class="wgrid">
-        ${wKpi('Devices', t.devices, ICON_DEV, '', '#/devices')}
-        ${wKpi('Problem devices', d.problem_devices, d.problem_devices ? ICON_WARN : '', d.problem_devices ? 'bad' : 'ok', '#/devices')}
-        ${wKpi('Active alerts', t.open_alerts, t.open_alerts ? ICON_WARN : '', t.open_alerts ? 'bad' : 'ok', '#/alerts')}
-        ${wKpi('Security patches missing', p.devices_security, p.devices_security ? ICON_WARN : '', p.devices_security ? 'bad' : 'ok', '#/patching')}
-
-        ${widget('Problem servers', 'With one or more active alerts', `<div class="wsplit">${wDonut([[sv.problems.failing, WC.red, 'Failing'], [sv.problems.warning, WC.amber, 'Warning'], [sv.problems.healthy, WC.gray, 'Healthy']], sv.total)}
-          ${wLegend([[sv.problems.failing, WC.red, 'Failing', '#/alerts'], [sv.problems.warning, WC.amber, 'Warning', '#/alerts'], [sv.problems.healthy, WC.gray, 'Healthy']])}</div>`)}
-        ${widget('Server status', 'All clients', `<div class="wsplit">${wBars([[sv.status.offline, WC.red, 'Offline'], [sv.status.reboot, WC.blue, 'Reboot'], [sv.status.patches, WC.gray, 'Patches pending'], [sv.status.online, WC.green, 'Online']])}
-          ${wLegend([[sv.status.offline, WC.red, 'Offline'], [sv.status.reboot, WC.blue, 'Reboot'], [sv.status.patches, WC.gray, 'Patches'], [sv.status.online, WC.green, 'Online']])}</div>`)}
-        ${widget('Problem workstations', 'With one or more active alerts', `<div class="wsplit">${wDonut([[ws.problems.failing, WC.red, 'Failing'], [ws.problems.warning, WC.amber, 'Warning'], [ws.problems.healthy, WC.gray, 'Healthy']], ws.total)}
-          ${wLegend([[ws.problems.failing, WC.red, 'Failing', '#/alerts'], [ws.problems.warning, WC.amber, 'Warning', '#/alerts'], [ws.problems.healthy, WC.gray, 'Healthy']])}</div>`)}
-        ${widget('Workstation status', 'All clients', `<div class="wsplit">${wBars([[ws.status.offline, WC.red, 'Offline'], [ws.status.reboot, WC.blue, 'Reboot'], [ws.status.patches, WC.gray, 'Patches pending'], [ws.status.online, WC.green, 'Online']])}
-          ${wLegend([[ws.status.offline, WC.red, 'Offline'], [ws.status.reboot, WC.blue, 'Reboot'], [ws.status.patches, WC.gray, 'Patches'], [ws.status.online, WC.green, 'Online']])}</div>`)}
-
-        ${widget('Device types', 'All clients', `<div class="wsplit">${wDonut([[sv.total, WC.blue, 'Servers'], [ws.total, WC.pink, 'Workstations']], t.devices)}
-          ${wLegend([[sv.total, WC.blue, 'Servers'], [ws.total, WC.pink, 'Workstations'], [t.maintenance, WC.amber, 'Maintenance']])}</div>`)}
-        ${widget('Devices by OS', 'All clients', `<div class="wsplit">${wDonut(osParts, t.devices)}${wLegend(osParts.map(([v, c, l]) => [v, c, l.length > 26 ? `${l.slice(0, 25)}…` : l]))}</div>`)}
-        ${widget('Last reboot time', 'Online devices', `<div class="wsplit wide">${wHBars(reboot)}${wLegend(reboot)}</div>`, { span: 2 })}
-
-        ${widget('Patch status', 'All devices', `<div class="wsplit">${wBars(patchParts)}${wLegend(patchParts.map(([v, c, l]) => [v, c, l, '#/patching']))}</div>`, { href: '#/patching' })}
-        ${widget('Resource alerts', `Over ${r.thresholds.cpu}% CPU / ${r.thresholds.mem}% memory / ${r.thresholds.disk}% disk`, `<div class="wsplit">${wBars(resParts)}${wLegend(resParts)}</div>`)}
-        ${widget('Agent status', 'HostPilot agents', `<div class="wsplit">${wBars(agentParts)}${wLegend(agentParts)}</div>`)}
-        ${widget('Jobs (24 h)', 'Scripts and tasks', `<div class="wsplit">${wBars(jobParts)}${wLegend(jobParts.map(([v, c, l]) => [v, c, l, '#/jobs']))}</div>`, { href: '#/jobs' })}
-
-        ${widget('Network right now', `${plural(n.reporting, 'device')} reporting`, `<div class="wnet"><div><div class="small muted">Download</div><div class="big" style="color:${WC.teal}">${fmtBits(n.total_rx * 8)}</div></div>
-          <div><div class="small muted">Upload</div><div class="big" style="color:${WC.pink}">${fmtBits(n.total_tx * 8)}</div></div></div>`)}
-        ${widget('Average utilisation', 'Online devices', `<div class="dash-meter"><span class="small">CPU</span>${meter(r.avg_cpu)}</div><div class="dash-meter"><span class="small">Memory</span>${meter(r.avg_mem)}</div><div class="dash-meter"><span class="small">Fullest disk</span>${meter(r.avg_disk)}</div>`)}
-        ${widget('Clients', `${plural(t.clients, 'client')}${t.unassigned ? ` · ${plural(t.unassigned, 'device')} unassigned` : ''}`, `<div class="wsplit">${wDonut(clientParts, t.clients)}${wLegend(clientParts.map(([v, c, l]) => [v, c, l, '#/clients']))}</div>`, { href: '#/clients' })}
-      </div>
-
-      <div class="dash-section">Trends & details</div>
-      <div class="grid cols-2">
-        <div class="card"><h2>Fleet trend (24 h)</h2>${trendRows.length > 1 ? chart(trendRows, [['devices', 'Devices reporting %', 'var(--ok)'], ['cpu', 'Avg CPU', 'var(--c1)'], ['mem', 'Avg memory', 'var(--c2)']], { hours: 24 }) : '<div class="muted">Collecting data… (hourly points appear as devices report)</div>'}</div>
-        <div class="card"><h2>Network traffic (24 h, whole fleet)</h2>${trendRows.filter((x) => x.net != null).length > 1 ? chart(trendRows, [['net', 'Download + upload', 'var(--c4)']], { hours: 24, rate: true }) : '<div class="muted">Collecting data… (hourly points appear as devices report)</div>'}</div>
-      </div>
-
-      <div class="grid cols-3" style="margin-top:16px">
-        ${listCard('Active alerts', d.recent_alerts.map((a) => `<tr class="clickable" data-href="#/devices/${a.agent_id}/alerts"><td>${badge(a.severity, a.severity === 'critical' ? 'bad' : 'warn')}</td><td><strong>${esc(a.hostname)}</strong><div class="small muted">${esc(a.message)}</div></td><td class="right muted small nowrap">${fmtAgo(a.created_at)}</td></tr>`).join(''), 'No active alerts 🎉', '<a href="#/alerts" class="small">All alerts →</a>')}
-        ${listCard('Clients', d.clients.slice(0, 8).map((c) => `<tr class="clickable" data-href="#/clients/${c.id}"><td><strong>${esc(c.name)}</strong><div class="small muted">${c.online}/${c.devices} online</div></td>
-          <td class="right">${c.alerts ? badge(`${c.alerts} alert${c.alerts > 1 ? 's' : ''}`, 'bad') : ''} ${c.patches ? badge(`${c.patches} patches`, 'warn') : ''}${!c.alerts && !c.patches ? badge('healthy', 'ok') : ''}</td></tr>`).join(''), 'No clients yet', '<a href="#/clients" class="small">All clients →</a>')}
-        ${listCard('Top network users', n.top.map((a) => devLink(a, `<span class="small"><span style="color:var(--c4)">↓ ${fmtBits(a.rx * 8)}</span> · <span style="color:var(--c5)">↑ ${fmtBits(a.tx * 8)}</span></span>`)).join(''), 'No network data yet')}
-        ${listCard('Highest CPU', r.top_cpu.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data')}
-        ${listCard('Highest memory', r.top_mem.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data')}
-        ${listCard('Fullest disks', r.top_disk.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data')}
-        ${listCard('Recently offline', h.recently_offline.map((a) => devLink(a, `<span class="small muted">${fmtAgo(a.last_seen)}</span>`)).join(''), 'All devices are online 🎉',
-          h.long_offline_count ? `<span class="small bad-text">${h.long_offline_count} offline &gt; 7 days</span>` : '')}
-        ${listCard('Running longest without reboot', h.long_uptime.map((a) => devLink(a, `<span class="small">${fmtDur(Date.now() - a.boot_time)}</span>`)).join(''), 'No device has been up for more than 30 days',
-          h.long_uptime_count ? `<span class="small muted">${h.long_uptime_count} up &gt; 30 days</span>` : '')}
-        ${listCard('Scheduled automation', d.schedules.map((s) => `<tr class="clickable" data-href="#/automation"><td><strong>${esc(s.name || s.script)}</strong><div class="small muted">${esc(s.script)} · every ${fmtDur(s.interval_minutes * 60000)}</div></td>
-          <td class="right small nowrap">${s.next_run <= Date.now() ? 'due now' : `in ${fmtDur(s.next_run - Date.now())}`}</td></tr>`).join(''), 'No scheduled tasks', '<a href="#/automation" class="small">Automation →</a>')}
-        ${listCard('Recent jobs', d.recent_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)} · ${esc(j.created_by)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join(''), 'No jobs yet', '<a href="#/jobs" class="small">Job history →</a>')}
-        ${listCard('Failed jobs (24 h)', d.failed_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join(''), 'No failed jobs 🎉')}
-        ${d.activity ? listCard('Recent activity', d.activity.map((x) => `<tr><td><strong>${esc(x.username)}</strong> <span class="mono small">${esc(x.action)}</span><div class="small muted">${esc(x.detail || '')}</div></td><td class="right muted small nowrap">${fmtAgo(x.ts)}</td></tr>`).join(''), 'No activity yet', '<a href="#/settings" class="small">Audit log →</a>') : ''}
-      </div>`;
+// Values the widgets share, computed once per refresh.
+function dashCtx(d) {
+  const t = d.totals, r = d.resources, p = d.patching, n = d.network, h = d.health, sv = d.servers, ws = d.workstations;
+  const osColors = [WC.blue, WC.pink, WC.teal, WC.amber, WC.purple, WC.gray];
+  const shortOs = (s) => s.replace(/^Microsoft /, '').replace(/ (Standard|Datacenter|Enterprise|Professional)\b.*$/, '').replace(/ GNU\/Linux/, '').replace(/ LTS$/, '');
+  const osParts = d.os.slice(0, 5).map((o, i) => [o.n, osColors[i], shortOs(o.name)]);
+  const otherOs = d.os.slice(5).reduce((s, o) => s + o.n, 0);
+  if (otherOs) osParts.push([otherOs, WC.gray, 'Other']);
+  return {
+    d, t, r, p, n, h, sv, ws, osParts,
+    failed: (d.jobs_24h.failed || 0) + (d.jobs_24h.timeout || 0) + (d.jobs_24h.lost || 0),
+    trendRows: d.trend.map((x) => ({ ts: x.ts + 1800000, cpu: x.cpu, mem: x.mem, devices: pct(x.devices, t.devices), net: x.net })),
+    reboot: [[sv.uptime.d30, WC.blue, 'Servers > 30 days'], [sv.uptime.d60, WC.pink, 'Servers > 60 days'], [sv.uptime.d90, WC.teal, 'Servers > 90 days'],
+      [ws.uptime.d30, WC.purple, 'Workstations > 30 days'], [ws.uptime.d60, WC.olive, 'Workstations > 60 days'], [ws.uptime.d90, WC.orange, 'Workstations > 90 days']],
+    patchParts: [[p.devices_security, WC.red, 'Security'], [p.devices_pending - p.devices_security, WC.amber, 'Pending'],
+      [p.reboot_required, WC.blue, 'Reboot'], [p.never_scanned, WC.gray, 'Not scanned'], [p.up_to_date, WC.green, 'Up to date']],
+    resParts: [[r.high_cpu, WC.red, 'High CPU'], [r.high_mem, WC.amber, 'High memory'], [r.low_disk, WC.orange, 'Low disk'],
+      [Math.max(0, t.online - Math.max(r.high_cpu, r.high_mem, 0)), WC.green, 'Normal']],
+    agentParts: [[d.agents.outdated, WC.amber, 'Updating'], [d.agents.offline, WC.gray, 'Offline'], [d.agents.current, WC.green, 'Up to date']],
+    jobParts: [[d.jobs_24h.failed || 0, WC.red, 'Failed'], [d.jobs_24h.timeout || 0, WC.amber, 'Timed out'],
+      [(d.jobs_24h.running || 0) + (d.jobs_24h.queued || 0), WC.blue, 'Running'], [d.jobs_24h.lost || 0, WC.gray, 'Lost'], [d.jobs_24h.success || 0, WC.green, 'Succeeded']],
+    clientParts: [[d.clients.filter((c) => c.alerts).length, WC.red, 'With alerts'], [d.clients.filter((c) => !c.alerts && c.patches).length, WC.amber, 'Need patches'],
+      [d.clients.filter((c) => !c.alerts && !c.patches && c.devices).length, WC.green, 'Healthy'], [d.clients.filter((c) => !c.devices).length, WC.gray, 'No devices']],
   };
-  await draw();
-  every(15000, draw);
+}
+
+const groupDonut = (g) => `<div class="wsplit">${wDonut([[g.problems.failing, WC.red, 'Failing'], [g.problems.warning, WC.amber, 'Warning'], [g.problems.healthy, WC.gray, 'Healthy']], g.total)}
+  ${wLegend([[g.problems.failing, WC.red, 'Failing', '#/alerts'], [g.problems.warning, WC.amber, 'Warning', '#/alerts'], [g.problems.healthy, WC.gray, 'Healthy']])}</div>`;
+const groupBars = (g) => `<div class="wsplit">${wBars([[g.status.offline, WC.red, 'Offline'], [g.status.reboot, WC.blue, 'Reboot'], [g.status.patches, WC.gray, 'Patches pending'], [g.status.online, WC.green, 'Online']])}
+  ${wLegend([[g.status.offline, WC.red, 'Offline'], [g.status.reboot, WC.blue, 'Reboot'], [g.status.patches, WC.gray, 'Patches'], [g.status.online, WC.green, 'Online']])}</div>`;
+const warnKpi = (title, v, href) => wKpi(title, v, v ? ICON_WARN : '', v ? 'bad' : 'ok', href);
+const COLLECTING = '<div class="muted">Collecting data… (hourly points appear as devices report)</div>';
+
+/**
+ * Every dashboard panel. span = default width in columns (1-4); group = section in the "Add widget" list;
+ * hidden: true = available but not on the default dashboard.
+ */
+const DASH_WIDGETS = [
+  { id: 'kpi-devices', group: 'Numbers', title: 'Devices', span: 1, render: (c) => wKpi('Devices', c.t.devices, ICON_DEV, '', '#/devices') },
+  { id: 'kpi-problems', group: 'Numbers', title: 'Problem devices', span: 1, render: (c) => warnKpi('Problem devices', c.d.problem_devices, '#/devices') },
+  { id: 'kpi-alerts', group: 'Numbers', title: 'Active alerts', span: 1, render: (c) => warnKpi('Active alerts', c.t.open_alerts, '#/alerts') },
+  { id: 'kpi-security', group: 'Numbers', title: 'Security patches missing', span: 1, render: (c) => warnKpi('Security patches missing', c.p.devices_security, '#/patching') },
+  { id: 'kpi-online', group: 'Numbers', title: 'Online devices', span: 1, hidden: true, render: (c) => wKpi('Online devices', c.t.online, ICON_DEV, 'ok', '#/devices') },
+  { id: 'kpi-offline', group: 'Numbers', title: 'Offline devices', span: 1, hidden: true, render: (c) => warnKpi('Offline devices', c.t.offline, '#/devices') },
+  { id: 'kpi-patches', group: 'Numbers', title: 'Pending patches', span: 1, hidden: true, render: (c) => warnKpi('Pending patches', c.p.pending, '#/patching') },
+  { id: 'kpi-reboot', group: 'Numbers', title: 'Reboot required', span: 1, hidden: true, render: (c) => warnKpi('Reboot required', c.p.reboot_required, '#/patching') },
+  { id: 'kpi-failed-jobs', group: 'Numbers', title: 'Failed jobs (24 h)', span: 1, hidden: true, render: (c) => warnKpi('Failed jobs (24 h)', c.failed, '#/jobs') },
+  { id: 'kpi-clients', group: 'Numbers', title: 'Clients', span: 1, hidden: true, render: (c) => wKpi('Clients', c.t.clients, '', '', '#/clients') },
+  { id: 'kpi-software', group: 'Numbers', title: 'Software titles', span: 1, hidden: true, render: (c) => wKpi('Software titles', c.t.software_titles, '', '', '#/software') },
+
+  { id: 'problem-servers', group: 'Charts', title: 'Problem servers', span: 1, render: (c) => widget('Problem servers', 'With one or more active alerts', groupDonut(c.sv)) },
+  { id: 'server-status', group: 'Charts', title: 'Server status', span: 1, render: (c) => widget('Server status', 'All clients', groupBars(c.sv)) },
+  { id: 'problem-workstations', group: 'Charts', title: 'Problem workstations', span: 1, render: (c) => widget('Problem workstations', 'With one or more active alerts', groupDonut(c.ws)) },
+  { id: 'workstation-status', group: 'Charts', title: 'Workstation status', span: 1, render: (c) => widget('Workstation status', 'All clients', groupBars(c.ws)) },
+  { id: 'device-types', group: 'Charts', title: 'Device types', span: 1, render: (c) => widget('Device types', 'All clients', `<div class="wsplit">${wDonut([[c.sv.total, WC.blue, 'Servers'], [c.ws.total, WC.pink, 'Workstations']], c.t.devices)}
+      ${wLegend([[c.sv.total, WC.blue, 'Servers'], [c.ws.total, WC.pink, 'Workstations'], [c.t.maintenance, WC.amber, 'Maintenance']])}</div>`) },
+  { id: 'devices-os', group: 'Charts', title: 'Devices by OS', span: 1, render: (c) => widget('Devices by OS', 'All clients', `<div class="wsplit">${wDonut(c.osParts, c.t.devices)}${wLegend(c.osParts.map(([v, col, l]) => [v, col, l.length > 26 ? `${l.slice(0, 25)}…` : l]))}</div>`) },
+  { id: 'reboot-time', group: 'Charts', title: 'Last reboot time', span: 2, render: (c) => widget('Last reboot time', 'Online devices', `<div class="wsplit wide">${wHBars(c.reboot)}${wLegend(c.reboot)}</div>`) },
+  { id: 'patch-status', group: 'Charts', title: 'Patch status', span: 1, render: (c) => widget('Patch status', 'All devices', `<div class="wsplit">${wBars(c.patchParts)}${wLegend(c.patchParts.map(([v, col, l]) => [v, col, l, '#/patching']))}</div>`, { href: '#/patching' }) },
+  { id: 'resource-alerts', group: 'Charts', title: 'Resource alerts', span: 1, render: (c) => widget('Resource alerts', `Over ${c.r.thresholds.cpu}% CPU / ${c.r.thresholds.mem}% memory / ${c.r.thresholds.disk}% disk`, `<div class="wsplit">${wBars(c.resParts)}${wLegend(c.resParts)}</div>`) },
+  { id: 'agent-status', group: 'Charts', title: 'Agent status', span: 1, render: (c) => widget('Agent status', 'HostPilot agents', `<div class="wsplit">${wBars(c.agentParts)}${wLegend(c.agentParts)}</div>`) },
+  { id: 'jobs-24h', group: 'Charts', title: 'Jobs (24 h)', span: 1, render: (c) => widget('Jobs (24 h)', 'Scripts and tasks', `<div class="wsplit">${wBars(c.jobParts)}${wLegend(c.jobParts.map(([v, col, l]) => [v, col, l, '#/jobs']))}</div>`, { href: '#/jobs' }) },
+  { id: 'network-now', group: 'Charts', title: 'Network right now', span: 1, render: (c) => widget('Network right now', `${plural(c.n.reporting, 'device')} reporting`, `<div class="wnet"><div><div class="small muted">Download</div><div class="big" style="color:${WC.teal}">${fmtBits(c.n.total_rx * 8)}</div></div>
+      <div><div class="small muted">Upload</div><div class="big" style="color:${WC.pink}">${fmtBits(c.n.total_tx * 8)}</div></div></div>`) },
+  { id: 'avg-utilisation', group: 'Charts', title: 'Average utilisation', span: 1, render: (c) => widget('Average utilisation', 'Online devices', `<div class="dash-meter"><span class="small">CPU</span>${meter(c.r.avg_cpu)}</div><div class="dash-meter"><span class="small">Memory</span>${meter(c.r.avg_mem)}</div><div class="dash-meter"><span class="small">Fullest disk</span>${meter(c.r.avg_disk)}</div>`) },
+  { id: 'clients-chart', group: 'Charts', title: 'Clients', span: 1, render: (c) => widget('Clients', `${plural(c.t.clients, 'client')}${c.t.unassigned ? ` · ${plural(c.t.unassigned, 'device')} unassigned` : ''}`, `<div class="wsplit">${wDonut(c.clientParts, c.t.clients)}${wLegend(c.clientParts.map(([v, col, l]) => [v, col, l, '#/clients']))}</div>`, { href: '#/clients' }) },
+  { id: 'fleet-trend', group: 'Charts', title: 'Fleet trend (24 h)', span: 2, render: (c) => widget('Fleet trend (24 h)', 'Devices reporting, average CPU and memory', c.trendRows.length > 1 ? chart(c.trendRows, [['devices', 'Devices reporting %', 'var(--ok)'], ['cpu', 'Avg CPU', 'var(--c1)'], ['mem', 'Avg memory', 'var(--c2)']], { hours: 24 }) : COLLECTING) },
+  { id: 'network-trend', group: 'Charts', title: 'Network traffic (24 h)', span: 2, render: (c) => widget('Network traffic (24 h)', 'Whole fleet, download + upload', c.trendRows.filter((x) => x.net != null).length > 1 ? chart(c.trendRows, [['net', 'Download + upload', 'var(--c4)']], { hours: 24, rate: true }) : COLLECTING) },
+
+  { id: 'list-alerts', group: 'Lists', title: 'Active alerts', span: 1, render: (c) => listCard('Active alerts', c.d.recent_alerts.map((a) => `<tr class="clickable" data-href="#/devices/${a.agent_id}/alerts"><td>${badge(a.severity, a.severity === 'critical' ? 'bad' : 'warn')}</td><td><strong>${esc(a.hostname)}</strong><div class="small muted">${esc(a.message)}</div></td><td class="right muted small nowrap">${fmtAgo(a.created_at)}</td></tr>`).join(''), 'No active alerts 🎉', '<a href="#/alerts" class="small">All alerts →</a>') },
+  { id: 'list-clients', group: 'Lists', title: 'Clients list', span: 1, render: (c) => listCard('Clients', c.d.clients.slice(0, 8).map((x) => `<tr class="clickable" data-href="#/clients/${x.id}"><td><strong>${esc(x.name)}</strong><div class="small muted">${x.online}/${x.devices} online</div></td>
+      <td class="right">${x.alerts ? badge(`${x.alerts} alert${x.alerts > 1 ? 's' : ''}`, 'bad') : ''} ${x.patches ? badge(`${x.patches} patches`, 'warn') : ''}${!x.alerts && !x.patches ? badge('healthy', 'ok') : ''}</td></tr>`).join(''), 'No clients yet', '<a href="#/clients" class="small">All clients →</a>') },
+  { id: 'list-network', group: 'Lists', title: 'Top network users', span: 1, render: (c) => listCard('Top network users', c.n.top.map((a) => devLink(a, `<span class="small"><span style="color:var(--c4)">↓ ${fmtBits(a.rx * 8)}</span> · <span style="color:var(--c5)">↑ ${fmtBits(a.tx * 8)}</span></span>`)).join(''), 'No network data yet') },
+  { id: 'list-cpu', group: 'Lists', title: 'Highest CPU', span: 1, render: (c) => listCard('Highest CPU', c.r.top_cpu.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data') },
+  { id: 'list-memory', group: 'Lists', title: 'Highest memory', span: 1, render: (c) => listCard('Highest memory', c.r.top_mem.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data') },
+  { id: 'list-disks', group: 'Lists', title: 'Fullest disks', span: 1, render: (c) => listCard('Fullest disks', c.r.top_disk.map((a) => devLink(a, `<div style="min-width:130px">${meter(a.value)}</div>`)).join(''), 'No data') },
+  { id: 'list-offline', group: 'Lists', title: 'Recently offline', span: 1, render: (c) => listCard('Recently offline', c.h.recently_offline.map((a) => devLink(a, `<span class="small muted">${fmtAgo(a.last_seen)}</span>`)).join(''), 'All devices are online 🎉',
+      c.h.long_offline_count ? `<span class="small bad-text">${c.h.long_offline_count} offline &gt; 7 days</span>` : '') },
+  { id: 'list-uptime', group: 'Lists', title: 'Running longest without reboot', span: 1, render: (c) => listCard('Running longest without reboot', c.h.long_uptime.map((a) => devLink(a, `<span class="small">${fmtDur(Date.now() - a.boot_time)}</span>`)).join(''), 'No device has been up for more than 30 days',
+      c.h.long_uptime_count ? `<span class="small muted">${c.h.long_uptime_count} up &gt; 30 days</span>` : '') },
+  { id: 'list-patches', group: 'Lists', title: 'Devices needing patches', span: 1, hidden: true, render: (c) => listCard('Devices needing patches', c.p.top.map((a) => devLink(a, `${a.security ? badge(`${a.security} security`, 'bad') + ' ' : ''}${badge(`${a.pending} pending`, 'warn')}${a.reboot ? ' ' + badge('reboot', 'info') : ''}`)).join(''), 'Everything scanned is up to date', '<a href="#/patching" class="small">Patching →</a>') },
+  { id: 'list-schedules', group: 'Lists', title: 'Scheduled automation', span: 1, render: (c) => listCard('Scheduled automation', c.d.schedules.map((s) => `<tr class="clickable" data-href="#/automation"><td><strong>${esc(s.name || s.script)}</strong><div class="small muted">${esc(s.script)} · every ${fmtDur(s.interval_minutes * 60000)}</div></td>
+      <td class="right small nowrap">${s.next_run <= Date.now() ? 'due now' : `in ${fmtDur(s.next_run - Date.now())}`}</td></tr>`).join(''), 'No scheduled tasks', '<a href="#/automation" class="small">Automation →</a>') },
+  { id: 'list-jobs', group: 'Lists', title: 'Recent jobs', span: 1, render: (c) => listCard('Recent jobs', c.d.recent_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)} · ${esc(j.created_by)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join(''), 'No jobs yet', '<a href="#/jobs" class="small">Job history →</a>') },
+  { id: 'list-failed-jobs', group: 'Lists', title: 'Failed jobs (24 h)', span: 1, render: (c) => listCard('Failed jobs (24 h)', c.d.failed_jobs.map((j) => `<tr class="clickable" data-job="${j.id}"><td>${badge(j.status)}</td><td><strong>${esc(j.name)}</strong><div class="small muted">${esc(j.hostname)}</div></td><td class="right muted small nowrap">${fmtAgo(j.created_at)}</td></tr>`).join(''), 'No failed jobs 🎉') },
+  { id: 'list-activity', group: 'Lists', title: 'Recent activity (admins)', span: 1, render: (c) => (c.d.activity ? listCard('Recent activity', c.d.activity.map((x) => `<tr><td><strong>${esc(x.username)}</strong> <span class="mono small">${esc(x.action)}</span><div class="small muted">${esc(x.detail || '')}</div></td><td class="right muted small nowrap">${fmtAgo(x.ts)}</td></tr>`).join(''), 'No activity yet', '<a href="#/settings" class="small">Audit log →</a>')
+      : widget('Recent activity', 'Admins only', '<div class="muted small">The audit log is only shown to admins.</div>')) },
+];
+const WIDGET_BY_ID = new Map(DASH_WIDGETS.map((w) => [w.id, w]));
+const DEFAULT_LAYOUT = () => DASH_WIDGETS.filter((w) => !w.hidden).map((w) => ({ id: w.id, span: w.span }));
+
+async function pageDashboard(view) {
+  let layout = null;
+  try { layout = (await api('GET', '/api/me/dashboard')).layout; } catch { /* use default */ }
+  layout = (layout || DEFAULT_LAYOUT()).filter((w) => WIDGET_BY_ID.has(w.id));
+  let editing = false, data = null, saveTimer = null, dragId = null;
+
+  const save = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => api('PUT', '/api/me/dashboard', { layout }).catch((e) => toast(`Couldn't save the layout: ${e.message}`, 'error')), 400);
+  };
+  const cell = (w, ctx) => {
+    const def = WIDGET_BY_ID.get(w.id);
+    let html;
+    try { html = def.render(ctx); } catch (e) { html = widget(def.title, 'Error', `<div class="small bad-text">${esc(e.message)}</div>`); }
+    const tools = editing ? `<div class="wedit" data-stop>
+        <span class="wedit-handle" title="Drag to move">⠿</span>
+        <button class="btn sm" data-w="left" title="Move earlier">←</button><button class="btn sm" data-w="right" title="Move later">→</button>
+        <select data-w="span" title="Width">${[1, 2, 3, 4].map((s) => `<option value="${s}" ${s === w.span ? 'selected' : ''}>${s === 1 ? '1 column' : `${s} columns`}</option>`).join('')}</select>
+        <button class="btn sm danger" data-w="remove" title="Remove from dashboard">✕</button></div>` : '';
+    return `<div class="wcell span-${w.span}${def.id.startsWith('kpi-') ? ' kpi' : ''}" data-wid="${w.id}"${editing ? ' draggable="true"' : ''}>${tools}${html}</div>`;
+  };
+
+  const render = () => {
+    if (!data) return;
+    const t = data.totals;
+    const hiddenList = DASH_WIDGETS.filter((w) => !layout.some((l) => l.id === w.id));
+    const head = `<div class="page-head"><h1>Dashboard</h1><div class="row">
+      ${editing ? `<select id="dash-add" style="width:auto"><option value="">+ Add widget…</option>${['Numbers', 'Charts', 'Lists'].map((g) => {
+        const items = hiddenList.filter((w) => w.group === g);
+        return items.length ? `<optgroup label="${g}">${items.map((w) => `<option value="${w.id}">${esc(w.title)}</option>`).join('')}</optgroup>` : '';
+      }).join('')}</select>
+        <button class="btn" id="dash-reset">Reset to default</button><button class="btn primary" id="dash-done">Done</button>`
+      : `<span class="small muted">Updated ${new Date(data.generated_at).toLocaleTimeString()} · refreshes every 15 s</span><button class="btn" id="dash-edit">Customize</button>`}</div></div>`;
+    if (t.devices === 0 && !editing) {
+      view.innerHTML = `${head}<div class="card"><h2>Get started</h2>
+        <p>1. Create a <a href="#/clients">client</a>. 2. On the client page, download the installer (Setup.exe or .sh) or copy the one-line command. 3. Run it on your Windows or Linux hosts. They appear here within a minute.</p></div>`;
+    } else {
+      const ctx = dashCtx(data);
+      view.innerHTML = `${head}${editing ? '<div class="dash-hint small muted">Drag widgets (or use ← →) to reorder, pick a width, remove with ✕, and add more from “Add widget”. Changes save automatically.</div>' : ''}
+        <div class="wgrid${editing ? ' editing' : ''}" id="dash-grid">${layout.map((w) => cell(w, ctx)).join('') || '<div class="card muted">No widgets. Use “Add widget” to put some back.</div>'}</div>`;
+    }
+    $('#dash-edit')?.addEventListener('click', () => { editing = true; render(); });
+    $('#dash-done')?.addEventListener('click', () => { editing = false; save(); render(); toast('Dashboard saved'); });
+    $('#dash-reset')?.addEventListener('click', guard(async () => {
+      if (!await confirmDialog('Reset the dashboard to the default widgets and order?', { okLabel: 'Reset' })) return;
+      layout = DEFAULT_LAYOUT();
+      await api('PUT', '/api/me/dashboard', { layout: null });
+      render();
+    }));
+    $('#dash-add')?.addEventListener('change', (e) => {
+      const def = WIDGET_BY_ID.get(e.target.value);
+      if (!def) return;
+      layout.push({ id: def.id, span: def.span });
+      save(); render();
+      $(`[data-wid="${def.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  };
+
+  // edit controls (delegated, so they survive re-renders)
+  const idx = (el) => layout.findIndex((w) => w.id === el.closest('[data-wid]')?.dataset.wid);
+  view.addEventListener('click', (e) => {
+    if (!editing || !e.target.closest('.wcell')) return;
+    e.stopPropagation(); // widget links and rows are inactive while editing
+    const b = e.target.closest('[data-w]');
+    if (b?.dataset.w === 'span') return; // let the width dropdown open
+    e.preventDefault();
+    if (!b) return;
+    const i = idx(b);
+    if (i < 0) return;
+    if (b.dataset.w === 'remove') layout.splice(i, 1);
+    if (b.dataset.w === 'left' && i > 0) [layout[i - 1], layout[i]] = [layout[i], layout[i - 1]];
+    if (b.dataset.w === 'right' && i < layout.length - 1) [layout[i + 1], layout[i]] = [layout[i], layout[i + 1]];
+    if (b.dataset.w !== 'span') { save(); render(); }
+  }, true);
+  view.addEventListener('change', (e) => {
+    const s = e.target.closest('[data-w="span"]');
+    if (!s) return;
+    const i = idx(s);
+    if (i >= 0) { layout[i].span = Number(s.value); save(); render(); }
+  });
+  // drag and drop (mouse); phones use the ← → buttons
+  view.addEventListener('dragstart', (e) => {
+    const c = e.target.closest?.('.wcell');
+    if (!editing || !c) return;
+    dragId = c.dataset.wid;
+    c.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragId);
+  });
+  view.addEventListener('dragover', (e) => {
+    if (!dragId) return;
+    const c = e.target.closest('.wcell');
+    if (!c || c.dataset.wid === dragId) return;
+    e.preventDefault();
+    const r = c.getBoundingClientRect();
+    const after = e.clientX > r.left + r.width / 2;
+    view.querySelectorAll('.drop-before,.drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after'));
+    c.classList.add(after ? 'drop-after' : 'drop-before');
+  });
+  view.addEventListener('drop', (e) => {
+    if (!dragId) return;
+    e.preventDefault();
+    const c = e.target.closest('.wcell');
+    const from = layout.findIndex((w) => w.id === dragId);
+    if (c && from >= 0 && c.dataset.wid !== dragId) {
+      const [moved] = layout.splice(from, 1);
+      let to = layout.findIndex((w) => w.id === c.dataset.wid);
+      if (c.classList.contains('drop-after')) to += 1;
+      layout.splice(to, 0, moved);
+      save();
+    }
+    dragId = null;
+    render();
+  });
+  view.addEventListener('dragend', () => { if (dragId) { dragId = null; render(); } });
+
+  const load = async () => {
+    if (editing && data) return; // don't redraw under the user's hands
+    data = await api('GET', '/api/dashboard');
+    render();
+  };
+  await load();
+  every(15000, load);
 }
 
 // ---------------- devices ----------------

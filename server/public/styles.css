@@ -209,11 +209,27 @@ table.dash td { padding: 8px 16px; }
 
 /* dashboard widget grid */
 .wgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.wgrid .span-2 { grid-column: span 2; }
-@media (max-width: 1250px) { .wgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.wcell { min-width: 0; position: relative; display: flex; flex-direction: column; }
+.wcell > .wcard, .wcell > .card { flex: 1; }
+.wcell.span-2 { grid-column: span 2; } .wcell.span-3 { grid-column: span 3; } .wcell.span-4 { grid-column: span 4; }
+@media (max-width: 1250px) { .wgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .wcell.span-3, .wcell.span-4 { grid-column: span 2; } }
+/* customize mode */
+.wgrid.editing .wcell { outline: 2px dashed var(--border); outline-offset: 2px; border-radius: 6px; cursor: grab; }
+.wgrid.editing .wcell > .wcard, .wgrid.editing .wcell > .card { pointer-events: none; opacity: .85; }
+.wgrid.editing .wcell.dragging { opacity: .4; }
+.wgrid.editing .wcell.drop-before { box-shadow: -4px 0 0 var(--accent); }
+.wgrid.editing .wcell.drop-after { box-shadow: 4px 0 0 var(--accent); }
+.wedit { display: flex; gap: 4px; align-items: center; justify-content: flex-end; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 3px; margin-bottom: 4px; }
+.wedit .wedit-handle { margin-right: auto; }
+.wedit .btn.sm { padding: 2px 8px; min-height: 26px; }
+.wedit select { width: auto; padding: 2px 6px; font-size: 12px; }
+.wedit-handle { cursor: grab; color: var(--muted); padding: 0 4px; font-size: 16px; user-select: none; }
+.dash-hint { margin: -8px 0 12px; }
 @media (max-width: 640px) {
   .wgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-  .wgrid > .wcard:not(.wkpi), .wgrid .span-2 { grid-column: 1 / -1; }
+  .wgrid > .wcell:not(.kpi) { grid-column: 1 / -1; }
+  .wgrid > .wcell.kpi { grid-column: span 1; }
+  .wedit-handle, .wedit select { display: none; } /* widths only matter on wider screens */
   .wkpi { min-height: 80px; }
   .wkpi-v { font-size: 24px; }
   .wkpi .wtitle { font-size: 13px; }

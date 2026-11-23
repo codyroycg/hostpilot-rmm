@@ -79,6 +79,26 @@ route('POST', '/api/logout', (ctx) => {
 
 route('GET', '/api/me', (ctx) => need(ctx));
 
+// per-user dashboard layout: [{ id, span }] in display order; null means "use the default layout"
+route('GET', '/api/me/dashboard', (ctx) => {
+  const u = need(ctx);
+  const row = get('SELECT dashboard FROM users WHERE id=?', u.id);
+  let layout = null;
+  try { layout = row?.dashboard ? JSON.parse(row.dashboard) : null; } catch { layout = null; }
+  return { layout };
+});
+route('PUT', '/api/me/dashboard', (ctx) => {
+  const u = need(ctx);
+  const raw = ctx.body.layout;
+  if (raw === null) { run('UPDATE users SET dashboard=NULL WHERE id=?', u.id); return { layout: null }; }
+  if (!Array.isArray(raw) || raw.length > 80) throw new HttpError(400, 'Invalid layout');
+  const seen = new Set();
+  const layout = raw.map((w) => ({ id: String(w?.id || ''), span: Math.min(4, Math.max(1, Math.round(Number(w?.span) || 1))) }))
+    .filter((w) => /^[a-z0-9-]{1,40}$/.test(w.id) && !seen.has(w.id) && seen.add(w.id));
+  run('UPDATE users SET dashboard=? WHERE id=?', JSON.stringify(layout), u.id);
+  return { layout };
+});
+
 route('POST', '/api/me/password', (ctx) => {
   const u = need(ctx);
   const { current, password } = ctx.body;
