@@ -1,0 +1,12 @@
+{
+  "name": "hostpilot-rmm",
+  "version": "1.0.0",
+  "description": "Self-hosted RMM: monitor and script Windows and Linux endpoints",
+  "type": "module",
+  "main": "src/index.js",
+  "private": true,
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/index.js"
+  }
+}

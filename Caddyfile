@@ -1,0 +1,9 @@
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy hostpilot:8080 {
+		# agent long-polls hold requests open for ~25s
+		transport http {
+			read_timeout 90s
+		}
+	}
+}

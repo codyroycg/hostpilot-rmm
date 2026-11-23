@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remote control · HostPilot RMM</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="remote-body">
+  <header class="rbar">
+    <div class="row">
+      <img src="/favicon.svg" alt="" width="22" height="22">
+      <strong id="r-host">Connecting…</strong>
+      <span class="badge info" id="r-status">starting</span>
+      <span class="small muted" id="r-stats"></span>
+    </div>
+    <div class="row">
+      <select id="r-quality" title="Image quality">
+        <option value="1 80">Best quality</option>
+        <option value="1 55" selected>Balanced</option>
+        <option value="0.6 40">Low bandwidth</option>
+      </select>
+      <select id="r-keys" title="Send key combination">
+        <option value="">Send keys…</option>
+        <option value="91">Windows key</option>
+        <option value="162,27">Ctrl+Esc (Start)</option>
+        <option value="164,9">Alt+Tab</option>
+        <option value="164,115">Alt+F4</option>
+        <option value="162,160,27">Ctrl+Shift+Esc (Task Manager)</option>
+        <option value="91,76">Win+L (lock)</option>
+        <option value="91,82">Win+R (Run)</option>
+        <option value="91,69">Win+E (Explorer)</option>
+        <option value="44">Print Screen</option>
+      </select>
+      <button class="btn sm" id="r-type">Type text…</button>
+      <button class="btn sm" id="r-fit">Actual size</button>
+      <button class="btn sm" id="r-fs">Fullscreen</button>
+      <button class="btn sm danger" id="r-end">Disconnect</button>
+    </div>
+  </header>
+  <div class="rstage" id="r-stage">
+    <canvas id="r-canvas" tabindex="0"></canvas>
+    <div class="roverlay" id="r-overlay">Starting remote session…</div>
+  </div>
+  <div class="rtype hidden" id="r-type-panel">
+    <label for="r-type-text">Text to type on the remote computer (useful for passwords and pasting)</label>
+    <textarea id="r-type-text" rows="4"></textarea>
+    <div class="row" style="justify-content:flex-end;margin-top:8px">
+      <button class="btn sm" id="r-type-cancel">Cancel</button>
+      <button class="btn sm primary" id="r-type-send">Type it</button>
+    </div>
+  </div>
+  <script type="module" src="/remote.js"></script>
+</body>
+</html>

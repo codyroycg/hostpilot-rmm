@@ -1,0 +1,42 @@
+services:
+  hostpilot:
+    build: .
+    image: hostpilot-rmm:latest
+    container_name: hostpilot
+    restart: unless-stopped
+    # Values come from a .env file next to this file, or from your stack
+    # variables in Dockhand / Portainer.
+    environment:
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+    volumes:
+      - hostpilot-data:/data
+    # Exposed directly for LAN/testing. When using the Caddy profile below,
+    # you can remove this and let Caddy be the only entry point.
+    ports:
+      - "${HOSTPILOT_PORT:-8080}:8080"
+
+  # HTTPS with automatic Let's Encrypt certificates.
+  # Enable with:  docker compose --profile https up -d
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-rmm.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - hostpilot
+
+volumes:
+  hostpilot-data:
+  caddy-data:
+  caddy-config:
