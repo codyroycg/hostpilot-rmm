@@ -193,7 +193,7 @@ route('GET', '/api/dashboard', (ctx) => {
 
   // operating systems
   const osCounts = new Map();
-  for (const a of agents) { const k = a.os_name || (a.platform === 'windows' ? 'Windows' : 'Linux'); osCounts.set(k, (osCounts.get(k) || 0) + 1); }
+  for (const a of agents) { const k = a.os_name || ({ windows: 'Windows', linux: 'Linux', macos: 'macOS' }[a.platform] || a.platform); osCounts.set(k, (osCounts.get(k) || 0) + 1); }
 
   // servers vs workstations (Windows Server editions and Linux hosts count as servers)
   const worst = new Map(all(`SELECT agent_id, MAX(CASE WHEN severity='critical' THEN 2 ELSE 1 END) AS lvl FROM alerts
@@ -225,7 +225,7 @@ route('GET', '/api/dashboard', (ctx) => {
     totals: {
       devices: agents.length, online: online.length, offline: agents.length - online.length,
       maintenance: count(agents, (a) => a.maintenance), with_alerts: count(agents, (a) => a.open_alerts > 0),
-      windows: count(agents, (a) => a.platform === 'windows'), linux: count(agents, (a) => a.platform === 'linux'),
+      windows: count(agents, (a) => a.platform === 'windows'), linux: count(agents, (a) => a.platform === 'linux'), macos: count(agents, (a) => a.platform === 'macos'),
       clients: clients.length, unassigned,
       open_alerts: alertRows.length, critical_alerts: count(alertRows, (a) => a.severity === 'critical'),
       users: get('SELECT COUNT(*) AS n FROM users').n, scripts: get('SELECT COUNT(*) AS n FROM scripts').n,
@@ -392,7 +392,7 @@ route('PUT', '/api/agents/:id', (ctx) => {
     for (const al of all("SELECT id, type FROM alerts WHERE agent_id=? AND type LIKE 'service:%' AND status IN ('open','ack')", a.id)) {
       const name = al.type.slice(8);
       const s = getSettings();
-      const global = String(s[`watch_services_${a.platform === 'windows' ? 'windows' : 'linux'}`] || '').toLowerCase().split(/[,\s]+/);
+      const global = String(s[`watch_services_${a.platform}`] || '').toLowerCase().split(/[,\s]+/);
       if (!list.map((x) => x.toLowerCase()).includes(name) && !global.includes(name)) run("UPDATE alerts SET status='resolved', resolved_at=? WHERE id=?", Date.now(), al.id);
     }
   }
@@ -746,7 +746,7 @@ async function runTask(u, a, task, args, { wait = true, allowInternal = false } 
     agents: [a], name: task, task, timeout: def.timeout, createdBy: u.username,
     build: (ag) => { const b = buildTask(task, ag.platform, args, { allowInternal }); if (b) title = b.name; return b; },
   });
-  if (!r.created) throw new HttpError(400, `This action isn't available on ${a.platform}`);
+  if (!r.created) throw new HttpError(400, `This action isn't available on ${{ windows: 'Windows', linux: 'Linux', macos: 'macOS' }[a.platform] || a.platform}`);
   const jobId = r.jobs[0].id;
   if (!/^(files\.list|users\.list|software\.search)$/.test(task)) audit(u.username, `task.${task}`, `${a.hostname}: ${title}`);
   if (wait && def.wait) await waitForJob(jobId, def.wait * 1000);
@@ -868,12 +868,12 @@ route('GET', '/api/agents/:id/chat', async (ctx) => {
   need(ctx, 'tech');
   const a = loadAgent(ctx.params.id);
   const msgs = await techRead(a.id, clampInt(ctx.query.get('after'), 0, 1e12, 0), clampInt(ctx.query.get('wait'), 0, 25, 0), ctx.res);
-  return { messages: msgs, supported: a.platform === 'windows', tray: !!getSettings().tray_icon, logged_user: a.logged_user };
+  return { messages: msgs, supported: ['windows', 'linux'].includes(a.platform), tray: !!getSettings().tray_icon, logged_user: a.logged_user };
 });
 route('POST', '/api/agents/:id/chat', (ctx) => {
   const u = need(ctx, 'tech');
   const a = loadAgent(ctx.params.id);
-  if (a.platform !== 'windows') throw new HttpError(400, 'Chat needs the Windows tray icon');
+  if (!['windows', 'linux'].includes(a.platform)) throw new HttpError(400, 'Chat needs the HostPilot tray icon (Windows or a Linux desktop)');
   const m = techSend(a, u, ctx.body.body);
   audit(u.username, 'chat.send', a.hostname);
   return m;

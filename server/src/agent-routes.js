@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { route, sendText, clientIp, publicUrl } from './router.js';
 import { get, run, tx, getSettings } from './db.js';
-import { HttpError, uuid, randHex, sha256, safeEqualHex, truncate, clampInt } from './util.js';
+import { HttpError, uuid, randHex, sha256, safeEqualHex, truncate, clampInt, PLATFORMS } from './util.js';
 import { addWaiter, claimJobs } from './jobs.js';
 import { evaluateThresholds, resolveAlert, openAlert } from './alerts.js';
 import { policyServicesFor } from './policies.js';
@@ -13,6 +13,7 @@ import { checkToken, receiveInto, sendFile } from './transfers.js';
 import { hostInput, hostOutput, hostClose } from './terminal.js';
 import { liveSample } from './live.js';
 import { chatTokenFor, devicePoll, deviceSend } from './chat.js';
+import { buildPkg } from './pkg.js';
 
 const AGENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 
@@ -27,15 +28,19 @@ export const AGENT_FILES = {
   'runner.ps1': loadFile('windows-runner.ps1', false),
   'remote.ps1': loadFile('windows-remote.ps1', false),
   'linux.sh': loadFile('linux-agent.sh', true),
+  'macos.sh': loadFile('macos-agent.sh', true),
   'tray.exe': loadFile('HostPilotTray.exe', false),
+  'tray-linux.py': loadFile('linux-tray.py', true),
 };
 const INSTALLERS = {
   windows: fs.readFileSync(path.join(AGENT_DIR, 'windows-install.ps1'), 'utf8'),
   linux: fs.readFileSync(path.join(AGENT_DIR, 'linux-install.sh'), 'utf8').replace(/\r\n/g, '\n'),
+  macos: fs.readFileSync(path.join(AGENT_DIR, 'macos-install.sh'), 'utf8').replace(/\r\n/g, '\n'),
 };
 export const AGENT_VERSIONS = {
   windows: AGENT_FILES['windows.ps1'].version,
   linux: AGENT_FILES['linux.sh'].version,
+  macos: AGENT_FILES['macos.sh'].version,
 };
 
 function validToken(token) {
@@ -90,7 +95,7 @@ route('POST', '/api/agent/enroll', (ctx) => {
   const { token, hostname, platform } = ctx.body;
   const t = validToken(token);
   if (!t) throw new HttpError(403, 'Invalid or expired enrollment token');
-  if (!['windows', 'linux'].includes(platform)) throw new HttpError(400, 'platform must be windows or linux');
+  if (!PLATFORMS.includes(platform)) throw new HttpError(400, 'platform must be windows, linux or macos');
   const id = uuid();
   const secret = randHex(32);
   tx(() => {
@@ -149,7 +154,7 @@ route('POST', '/api/agent/checkin', (ctx) => {
   if (Array.isArray(b.core_load)) fields.core_load = JSON.stringify(b.core_load.slice(0, 512).map((v) => Math.max(0, Math.min(100, Math.round(num(v) || 0)))));
   if (b.chassis !== undefined || b.is_virtual !== undefined) {
     fields.device_class = deviceClass({ chassis: Array.isArray(b.chassis) ? b.chassis.map(Number) : [], virtual: b.is_virtual === true || b.is_virtual === 'true',
-      pcType: num(b.pc_type), platform: a.platform, os: fields.os_name || a.os_name || '' });
+      pcType: num(b.pc_type), platform: a.platform, os: fields.os_name || a.os_name || '', macModel: str(b.mac_model, 100) || '' });
   }
   let services = null;
   if (Array.isArray(b.services)) {
@@ -172,8 +177,9 @@ route('POST', '/api/agent/checkin', (ctx) => {
 
 const LAPTOP = new Set([8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32]);
 const SERVER_CHASSIS = new Set([17, 23, 25, 28, 29]);
-function deviceClass({ chassis, virtual, pcType, platform, os }) {
+function deviceClass({ chassis, virtual, pcType, platform, os, macModel }) {
   if (virtual) return 'vm';
+  if (platform === 'macos') return /^MacBook/i.test(macModel) ? 'laptop' : /^Xserve/i.test(macModel) ? 'server' : 'desktop';
   if (/server/i.test(os) || chassis.some((c) => SERVER_CHASSIS.has(c)) || pcType === 4 || pcType === 5) return 'server';
   if (chassis.some((c) => LAPTOP.has(c)) || pcType === 2) return 'laptop';
   return platform === 'linux' ? 'server' : 'desktop';
@@ -183,7 +189,7 @@ const SERVICE_NAME = /^[\w.@:+-]{1,100}$/;
 /** Services this device should report: global list for its platform + its own extra list + policy rules. */
 export function watchedServices(a) {
   const s = getSettings();
-  const list = [s[`watch_services_${a.platform === 'windows' ? 'windows' : 'linux'}`], a.watch_services].join(',')
+  const list = [s[`watch_services_${a.platform}`], a.watch_services].join(',')
     .split(/[,\s]+/).map((x) => x.trim()).filter((x) => SERVICE_NAME.test(x));
   return [...new Set([...list, ...policyServicesFor(a)])].slice(0, 50);
 }
@@ -245,6 +251,10 @@ route('GET', '/api/agent/poll', async (ctx) => {
 
   if (ctx.query.get('format') === 'text') {
     const lines = [`VERSION\t${version}`, `INTERVAL\t${s.checkin_seconds}`];
+    if (a.platform === 'linux') {
+      // desktop tray icon (installed only on machines with a graphical desktop) and its chat token
+      lines.push(`TRAY\t${s.tray_icon ? AGENT_FILES['tray-linux.py'].version : ''}`, `CHAT\t${chatTokenFor(a.id)}`);
+    }
     if (wantInv) lines.push('INV\t1');
     for (const j of jobs) {
       lines.push(['JOB', j.id, j.shell, j.timeout, Buffer.from(j.body || '', 'utf8').toString('base64')].join('\t'));
@@ -325,6 +335,18 @@ route('GET', '/download/:token/:file', (ctx) => {
       break;
     case 'hostpilot-install.ps1':
       buf = Buffer.from(INSTALLERS.windows.replaceAll('__SERVER_URL__', server).replaceAll('__TOKEN__', token));
+      break;
+    case 'HostPilot-Installer.pkg': {
+      // macOS installer package: its postinstall step is the same script as the one-line installer
+      const script = INSTALLERS.macos.replaceAll('__SERVER_URL__', server).replaceAll('__TOKEN__', token)
+        .replace('set -eu', 'set -eu\nexec >>/var/log/hostpilot-install.log 2>&1\necho "--- $(date) HostPilot package install"');
+      buf = buildPkg({ identifier: 'com.hostpilot.agent.installer', version: '1.0', script });
+      type = 'application/octet-stream';
+      break;
+    }
+    case 'hostpilot-install-macos.sh':
+      buf = Buffer.from(INSTALLERS.macos.replaceAll('__SERVER_URL__', server).replaceAll('__TOKEN__', token));
+      type = 'text/x-shellscript';
       break;
     default:
       throw new HttpError(404, 'Not found');

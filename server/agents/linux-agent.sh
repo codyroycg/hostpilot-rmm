@@ -222,6 +222,7 @@ post_message() { # id exit_code message
 uninstall() {
   post_message "$1" 0 "Agent uninstall scheduled"
   log "uninstall requested by server"
+  remove_tray; rm -rf "$TRAY_STATE"
   # Runs inline: systemd kills the whole cgroup when the service stops, so no background helpers.
   systemctl disable hostpilot-agent >/dev/null 2>&1
   rm -f /etc/systemd/system/hostpilot-agent.service
@@ -302,12 +303,79 @@ force_update() { # [job_id]
   return 0
 }
 
-# status for "agent.sh --status": state, last-contact epoch, message
+# status for "agent.sh --status" (state, last-contact epoch, message) and for the desktop tray icon:
+# /var/lib/hostpilot-tray/status.json is readable by every user; requests/ (sticky, world-writable) takes
+# "update-now" requests from the icon. The chat token there only grants access to this device's chat.
+TRAY_STATE=/var/lib/hostpilot-tray
+TRAY_DIR=/opt/hostpilot-tray
+TRAY_PY="$TRAY_DIR/hostpilot-tray.py"
+TRAY_DESKTOP=/etc/xdg/autostart/hostpilot-tray.desktop
+CHAT_TOKEN=""
+mkdir -p "$TRAY_STATE/requests" 2>/dev/null && chmod 755 "$TRAY_STATE" && chmod 1777 "$TRAY_STATE/requests"
 last_contact=0
 set_status() {
   [ "$1" = connected ] && last_contact=$(date +%s)
   printf '%s %s %s\n' "$1" "$last_contact" "$2" > "$BASE/status" 2>/dev/null
+  printf '{"state":"%s","heartbeat":%s000,"last_contact":%s000,"server":"%s","version":"%s","message":"%s","chat_token":"%s"}\n' \
+    "$1" "$(date +%s)" "$last_contact" "$(jesc "$SERVER")" "$MY_VERSION" "$(jesc "$2")" "$CHAT_TOKEN" > "$TRAY_STATE/status.json.tmp" 2>/dev/null &&
+    chmod 644 "$TRAY_STATE/status.json.tmp" && mv -f "$TRAY_STATE/status.json.tmp" "$TRAY_STATE/status.json"
 }
+
+# ---------------- desktop tray icon ----------------
+has_desktop() { ls /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop >/dev/null 2>&1; }
+remove_tray() {
+  pkill -f "$TRAY_PY" 2>/dev/null
+  rm -rf "$TRAY_DIR" "$TRAY_DESKTOP"
+}
+# start the icon in graphical sessions that are already logged in (new logins use the autostart entry).
+# systemd-run keeps it out of the agent's cgroup, so agent restarts/updates don't kill it.
+start_tray_sessions() {
+  command -v loginctl >/dev/null 2>&1 || return 0
+  local sid uid user type p envs v
+  for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+    type="$(loginctl show-session "$sid" -p Type --value 2>/dev/null)"
+    case "$type" in x11|wayland) ;; *) continue ;; esac
+    uid="$(loginctl show-session "$sid" -p User --value 2>/dev/null)"; user="$(loginctl show-session "$sid" -p Name --value 2>/dev/null)"
+    [ -n "$uid" ] && [ "$uid" -ge 1000 ] 2>/dev/null || continue
+    # copy the display variables from one of the user's GUI processes
+    envs=""
+    for p in $(pgrep -u "$uid" 2>/dev/null); do
+      if tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qE '^(DISPLAY|WAYLAND_DISPLAY)='; then
+        for v in $(tr '\0' '\n' < "/proc/$p/environ" | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|XDG_CURRENT_DESKTOP|XDG_SESSION_TYPE|HOME|LANG)='); do
+          envs="$envs --setenv=$v"
+        done
+        break
+      fi
+    done
+    [ -n "$envs" ] || continue
+    systemd-run --quiet --collect --uid="$uid" --gid="$(id -g "$uid")" --setenv=USER="$user" $envs \
+      --unit="hostpilot-tray-$uid-$(date +%s)" /usr/bin/python3 "$TRAY_PY" >/dev/null 2>&1 && log "tray started for $user"
+  done
+}
+install_tray() { # <version>; empty = icon disabled on the server
+  local v="$1"
+  if [ -z "$v" ]; then [ -e "$TRAY_PY" ] && { remove_tray; log "tray icon removed (disabled on server)"; }; return 0; fi
+  has_desktop || return 0
+  if ! python3 -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' >/dev/null 2>&1; then
+    log "tray icon skipped: python3 with GTK 3 (python3-gi) is not installed"; return 0
+  fi
+  local changed=0
+  if [ "$(sha256sum "$TRAY_PY" 2>/dev/null | cut -c1-12)" != "$v" ]; then
+    mkdir -p "$TRAY_DIR" && chmod 755 "$TRAY_DIR"
+    curl -fsS --max-time 60 -o "$TRAY_PY.new" "$SERVER/agent/tray-linux.py" || { rm -f "$TRAY_PY.new"; return 0; }
+    [ "$(sha256sum "$TRAY_PY.new" | cut -c1-12)" = "$v" ] || { rm -f "$TRAY_PY.new"; log "tray hash mismatch"; return 0; }
+    chmod 755 "$TRAY_PY.new"; mv -f "$TRAY_PY.new" "$TRAY_PY"
+    pkill -f "$TRAY_PY" 2>/dev/null
+    changed=1; log "tray icon installed ($v)"
+  fi
+  if [ ! -f "$TRAY_DESKTOP" ]; then
+    mkdir -p /etc/xdg/autostart
+    printf '[Desktop Entry]\nType=Application\nName=HostPilot\nComment=HostPilot agent status and IT support chat\nExec=/usr/bin/python3 %s\nIcon=preferences-system\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n' "$TRAY_PY" > "$TRAY_DESKTOP"
+    chmod 644 "$TRAY_DESKTOP"; changed=1
+  fi
+  if [ "$changed" = 1 ] || [ -z "$TRAY_STARTED" ]; then start_tray_sessions; TRAY_STARTED=1; fi
+}
+TRAY_SEEN="-"
 
 log "agent $MY_VERSION starting (server $SERVER)"
 interval=60
@@ -317,6 +385,7 @@ body="$JOBDIR/.checkin.json"
 
 while true; do
   [ -e "$BASE/update-now" ] && force_update
+  [ -e "$TRAY_STATE/requests/update-now" ] && { rm -f "$TRAY_STATE/requests/update-now"; force_update; }
   now=$(date +%s)
   if [ $((now - last_checkin)) -ge "$interval" ]; then
     checkin_body "$body"
@@ -338,10 +407,12 @@ while true; do
   if resp=$(api GET "/api/agent/poll?wait=$wait_s&format=text" "" $((wait_s + 30))); then
     failures=0
     set_status connected
-    want_inv=0; srv_version=""
+    want_inv=0; srv_version=""; tray_v="-"
     while IFS=$'\t' read -r kind a b c d; do
       case "$kind" in
         VERSION) srv_version="$a" ;;
+        TRAY) tray_v="$a" ;;
+        CHAT) CHAT_TOKEN="$a" ;;
         INTERVAL) [ "$a" -ge 15 ] 2>/dev/null && interval="$a" ;;
         INV) want_inv=1 ;;
         JOB) start_job "$a" "$b" "$c" "$d" ;;
@@ -349,6 +420,7 @@ while true; do
     done <<< "$resp"
     check_jobs
     [ "$want_inv" = 1 ] && send_inventory
+    if [ "$tray_v" != "-" ] && [ "$tray_v" != "$TRAY_SEEN" ]; then TRAY_SEEN="$tray_v"; install_tray "$tray_v"; fi
     if [ -n "$srv_version" ] && [ "$srv_version" != "$MY_VERSION" ]; then self_update "$srv_version"; fi
   else
     failures=$((failures + 1))

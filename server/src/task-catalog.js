@@ -234,7 +234,16 @@ function argsBlock(args, platform) {
   if (platform === 'windows') {
     return ['$A = @{}', ...Object.entries(args).map(([k, v]) => `$A['${k}'] = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(v)}'))`)].join('\n');
   }
-  return Object.entries(args).map(([k, v]) => `A_${k}="$(printf '%s' '${b64(v)}' | base64 -d)"`).join('\n');
+  const dec = platform === 'macos' ? 'base64 -D' : 'base64 -d'; // macOS (BSD) base64 decodes with -D
+  return Object.entries(args).map(([k, v]) => `A_${k}="$(printf '%s' '${b64(v)}' | ${dec})"`).join('\n');
+}
+
+// macOS: a task uses <task>.mac.sh when present, otherwise the Linux .sh only if it is known to be portable
+const MAC_PORTABLE = new Set(['files.get', 'files.put', 'files.rename', 'files.mkdir', 'hardware.printers']);
+function templateFor(task, platform) {
+  if (platform === 'windows') return expand(`${task}.ps1`);
+  if (platform === 'macos') return expand(`${task}.mac.sh`) ?? (MAC_PORTABLE.has(task) ? expand(`${task}.sh`) : null);
+  return expand(`${task}.sh`);
 }
 
 function displayBlock(args, secret = []) {
@@ -246,8 +255,7 @@ const PS_PRELUDE = "$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'Sile
 /** Returns {shell, body, displayBody, name, timeout} or null when the task has no script for this platform. */
 export function buildTask(task, platform, rawArgs = {}, opts = {}) {
   const def = getTask(task, opts);
-  const ext = platform === 'windows' ? 'ps1' : 'sh';
-  const tpl = expand(`${task}.${ext}`);
+  const tpl = templateFor(task, platform);
   if (tpl == null) return null;
   const args = def.args(rawArgs || {}, platform);
   const prelude = platform === 'windows' ? PS_PRELUDE : '';
@@ -261,5 +269,6 @@ export function buildTask(task, platform, rawArgs = {}, opts = {}) {
   };
 }
 
-export const supportsTask = (task, platform) => TEMPLATES.has(`${task}.${platform === 'windows' ? 'ps1' : 'sh'}`);
+export const supportsTask = (task, platform) => platform === 'windows' ? TEMPLATES.has(`${task}.ps1`)
+  : platform === 'macos' ? TEMPLATES.has(`${task}.mac.sh`) || (MAC_PORTABLE.has(task) && TEMPLATES.has(`${task}.sh`)) : TEMPLATES.has(`${task}.sh`);
 export { base as baseName };

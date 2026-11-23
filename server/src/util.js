@@ -28,17 +28,19 @@ export function verifyPassword(pw, stored) {
   return want.length === calc.length && crypto.timingSafeEqual(calc, want);
 }
 
+// shell -> platforms that can run it
 export const SHELLS = {
-  powershell: 'windows',
-  cmd: 'windows',
-  bash: 'linux',
-  sh: 'linux',
-  python: 'any',
+  powershell: ['windows'],
+  cmd: ['windows'],
+  bash: ['linux', 'macos'],
+  sh: ['linux', 'macos'],
+  zsh: ['macos', 'linux'],
+  python: ['windows', 'linux', 'macos'],
 };
+export const PLATFORMS = ['windows', 'linux', 'macos'];
 
 export function shellSupported(shell, platform) {
-  const p = SHELLS[shell];
-  return p === 'any' || p === platform;
+  return (SHELLS[shell] || []).includes(platform);
 }
 
 export function truncate(s, max = 1024 * 1024) {

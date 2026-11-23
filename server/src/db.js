@@ -165,6 +165,7 @@ export const SETTING_DEFAULTS = {
   tray_icon: 1, // 1 = show the HostPilot status icon in the Windows taskbar
   watch_services_windows: '', // services monitored on every Windows device (comma separated)
   watch_services_linux: '',
+  watch_services_macos: '',
 };
 
 export function getSettings() {

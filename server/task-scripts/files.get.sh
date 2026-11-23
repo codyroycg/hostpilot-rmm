@@ -9,7 +9,7 @@ if [ -d "$p" ]; then
   echo "Sent folder $p as tar.gz"
 elif [ -f "$p" ]; then
   curl -sS --fail -H 'Content-Type: application/octet-stream' -H 'Expect:' -T "$p" "$HP$A_url" || exit 1
-  echo "Sent $(stat -c %s "$p" 2>/dev/null) bytes"
+  echo "Sent $(wc -c < "$p" | tr -d ' ') bytes"
 else
   echo "Not found: $p" >&2; exit 1
 fi

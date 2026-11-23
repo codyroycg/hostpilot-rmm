@@ -75,13 +75,17 @@ function meter(v) {
 
 const ICONS = {
   windows: '<svg viewBox="0 0 24 24" fill="#38bdf8"><path d="M3 5.5 10.5 4.5v7H3zM11.5 4.3 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.3z"/></svg>',
+  macos: '<svg viewBox="0 0 24 24" fill="#a3a3a3"><path d="M16.4 12.6c0-2.4 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9s-2-.9-3.3-.9c-1.7 0-3.3 1-4.2 2.5-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8s2 .8 3.3.8c1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9 0 0-2.8-1.1-2.8-4.2zM14 5.3c.7-.9 1.2-2 1-3.2-1 0-2.3.7-3 1.6-.7.8-1.2 2-1.1 3.1 1.2.1 2.3-.6 3.1-1.5z"/></svg>',
   linux: '<svg viewBox="0 0 24 24" fill="#f59e0b"><path d="M12 2c-2.2 0-3.5 1.9-3.5 4.3 0 1.5.3 2.4-.6 3.9C6.8 12 5 14.4 5 17c0 .8.2 1.4.5 1.9-.6.4-1 .9-1 1.5C4.5 21.5 6 22 8 22c1.3 0 2.3-.4 3-.9.3.1.6.1 1 .1s.7 0 1-.1c.7.5 1.7.9 3 .9 2 0 3.5-.5 3.5-1.6 0-.6-.4-1.1-1-1.5.3-.5.5-1.1.5-1.9 0-2.6-1.8-5-2.9-6.8-.9-1.5-.6-2.4-.6-3.9C15.5 3.9 14.2 2 12 2z"/></svg>',
 };
 const osCell = (a) => `<span class="os">${ICONS[a.platform] || ''}${esc(a.os_name || a.platform || '')}</span>`;
 const statusDot = (a) => `<span class="dot ${a.maintenance ? 'maint' : a.online ? 'on' : 'off'}" title="${a.maintenance ? 'Maintenance mode' : a.online ? 'Online' : 'Offline'}"></span>`;
 const badge = (s, cls = s) => `<span class="badge ${esc(cls)}">${esc(s)}</span>`;
-const SHELLS_FOR = { windows: ['powershell', 'cmd', 'python'], linux: ['bash', 'sh', 'python'] };
-const SHELL_OS = { powershell: 'windows', cmd: 'windows', bash: 'linux', sh: 'linux', python: 'any' };
+const SHELLS_FOR = { windows: ['powershell', 'cmd', 'python'], linux: ['bash', 'sh', 'python'], macos: ['bash', 'zsh', 'sh', 'python'] };
+// shell -> platforms that can run it
+const SHELL_OS = { powershell: ['windows'], cmd: ['windows'], bash: ['linux', 'macos'], sh: ['linux', 'macos'], zsh: ['macos', 'linux'], python: ['windows', 'linux', 'macos'] };
+const shellIcon = (sh) => { const p = SHELL_OS[sh] || []; return p.length === 1 ? ICONS[p[0]] : p.includes('windows') ? '' : ICONS.linux + ICONS.macos; };
+const PLATFORM_NAME = { windows: 'Windows', linux: 'Linux', macos: 'macOS' };
 
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); }
@@ -963,7 +967,7 @@ async function devChat(el, a) {
       <span class="small muted" id="ch-status"></span></div>
     <div class="chatlog" id="ch-log"><div class="muted small">Loading…</div></div>
     <form id="ch-form" class="chatform"><textarea name="body" rows="2" placeholder="Write a message… (Enter to send, Shift+Enter for a new line)" maxlength="4000"></textarea><button class="btn primary">Send</button></form>
-    <p class="small muted" style="margin:8px 0 0">The message pops up on the device through the HostPilot taskbar icon, and the user can reply. Users can also start a chat from the icon's menu. Requires the taskbar icon (Settings → Windows taskbar icon).</p></div>`;
+    <p class="small muted" style="margin:8px 0 0">The message pops up on the device through the HostPilot taskbar/tray icon, and the user can reply. Users can also start a chat from the icon's menu. Needs the icon (Settings → Taskbar / tray icon)${a.platform === 'linux' ? ', which runs on Linux machines with a desktop (GNOME, KDE, Xfce, Cinnamon, MATE…) and python3-gi' : ''}.</p></div>`;
   const draw = () => {
     const log = $('#ch-log');
     if (!log) { alive = false; return; }
@@ -1007,7 +1011,7 @@ async function pageMessages(view) {
   const draw = async () => {
     const list = await api('GET', '/api/chat/conversations');
     view.innerHTML = `<div class="page-head"><h1>Messages</h1></div>
-      <p class="small muted" style="margin-top:-8px">Chats with signed-in users through the HostPilot taskbar icon (Windows). Open a device's Chat tab to start one.</p>
+      <p class="small muted" style="margin-top:-8px">Chats with signed-in users through the HostPilot taskbar/tray icon (Windows and Linux desktops). Open a device's Chat tab to start one.</p>
       <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Device</th><th>Last message</th><th>When</th><th></th></tr></thead><tbody>
       ${list.map((c) => `<tr class="clickable" data-href="#/devices/${c.agent_id}/chat"><td><strong>${esc(c.hostname)}</strong><div class="small muted">${esc(c.logged_user || '')}</div></td>
         <td class="small">${c.last_dir === 'tech' ? '<span class="muted">You: </span>' : ''}${esc((c.last_body || '').slice(0, 120))}</td><td class="small nowrap">${fmtAgo(c.last_at)}</td>
@@ -1180,7 +1184,7 @@ async function pageDevices(view) {
       <input type="search" id="dev-q" placeholder="Search hostname, IP, user, OS…" value="${esc(f.q)}">
       <select id="dev-client"><option value="">All clients</option>${clients.map((c) => `<option value="${c.id}" ${String(f.client) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="dev-status"><option value="">Any status</option><option value="online">Online</option><option value="offline">Offline</option><option value="alerts">With alerts</option><option value="maintenance">Maintenance</option></select>
-      <select id="dev-platform"><option value="">All platforms</option><option value="windows">Windows</option><option value="linux">Linux</option></select>
+      <select id="dev-platform"><option value="">All platforms</option><option value="windows">Windows</option><option value="linux">Linux</option><option value="macos">macOS</option></select>
       <select id="dev-class"><option value="">All device types</option><option value="desktop">Desktops</option><option value="laptop">Laptops</option><option value="server">Servers</option><option value="vm">Virtual machines</option></select>
       <span class="muted small" id="dev-count"></span>
     </div>
@@ -1274,7 +1278,7 @@ async function pageDevice(view, id, tab = 'overview') {
   const win = a.platform === 'windows';
   const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['tasks', 'Task manager'], ...(win ? [['registry', 'Registry']] : []),
     ['updates', 'Updates'], ['software', 'Software'], ['users', 'Users'], ['hardware', 'Hardware'], ['firewall', 'Firewall'], ['compliance', 'Compliance'],
-    ...(win ? [['chat', 'Chat']] : []), ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+    ...(win || a.platform === 'linux' ? [['chat', 'Chat']] : []), ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
   const term = (shell, label) => `<a class="btn" href="/terminal.html#${encodeURIComponent(a.id)}${shell ? `/${shell}` : ''}" target="_blank" rel="noopener" title="Opens a background session as SYSTEM/root; the signed-in user sees nothing">${label}</a>`;
   view.innerHTML = `
     <div class="page-head"><div>
@@ -1460,19 +1464,19 @@ async function devSoftware(el, a) {
   const tech = can('tech');
   el.innerHTML = `<div class="toolbar"><input type="search" id="sw-q" placeholder="Filter ${sw.length} packages…">
       <span class="muted small">Inventory updated ${fmtAgo(a.inventory_at)}</span><span class="grow"></span>
-      ${tech ? '<button class="btn primary" id="sw-install">Install software…</button>' : ''}</div>
+      ${tech && a.platform !== 'macos' ? '<button class="btn primary" id="sw-install">Install software…</button>' : ''}</div>
     <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Version</th><th>Publisher</th>${tech ? '<th></th>' : ''}</tr></thead><tbody id="sw-body"></tbody></table></div></div>`;
   const draw = () => {
     const q = $('#sw-q').value.toLowerCase();
     const rows = sw.filter((s) => !q || `${s.name} ${s.publisher}`.toLowerCase().includes(q));
     $('#sw-body').innerHTML = rows.slice(0, 2000).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono small">${esc(s.version)}</td><td class="small muted">${esc(s.publisher)}</td>
-      ${tech ? `<td class="right nowrap"><button class="btn sm" data-sw="reinstall" data-name="${esc(s.name)}">Reinstall</button> <button class="btn sm danger" data-sw="uninstall" data-name="${esc(s.name)}">Uninstall</button></td>` : ''}</tr>`).join('')
+      ${tech && a.platform === 'macos' ? '<td class="right small muted">—</td>' : ''}${tech && a.platform !== 'macos' ? `<td class="right nowrap"><button class="btn sm" data-sw="reinstall" data-name="${esc(s.name)}">Reinstall</button> <button class="btn sm danger" data-sw="uninstall" data-name="${esc(s.name)}">Uninstall</button></td>` : ''}</tr>`).join('')
       || `<tr><td colspan="4" class="empty">No software inventory yet</td></tr>`;
   };
   $('#sw-q').addEventListener('input', draw);
   draw();
   if (!tech) return;
-  $('#sw-install').addEventListener('click', () => installSoftwareModal(a));
+  $('#sw-install')?.addEventListener('click', () => installSoftwareModal(a));
   $('#sw-body').addEventListener('click', guard(async (e) => {
     const b = e.target.closest('[data-sw]');
     if (!b) return;
@@ -2016,7 +2020,7 @@ async function devFirewall(el, a) {
         ${din ? `<span class="small muted">in: ${esc(din)} · out: ${esc(dout)}</span>` : ''}`).join(' ');
       $('#fw-status').textContent = isWin(a) ? 'Windows Defender Firewall' : ({ ufw: 'ufw', firewalld: 'firewalld', 'ufw-inactive': 'ufw (not enabled)', nftables: 'nftables (read-only)', iptables: 'iptables (read-only)', none: 'No firewall found' }[backend] || backend);
       $('#fw-new').disabled = !managed();
-      if (!managed()) $('#fw-foot').textContent = 'Rule management needs ufw or firewalld on Linux.';
+      if (!managed()) $('#fw-foot').textContent = a.platform === 'macos' ? 'macOS Application Firewall (read-only): it allows or blocks apps, not ports. Change it in System Preferences or with a script.' : 'Rule management needs ufw or firewalld on Linux.';
     } catch (err) { $('#fw-status').textContent = err.message; }
     draw();
   };
@@ -2152,7 +2156,7 @@ async function openRunModal(agentIds) {
   const [scripts, agents] = await Promise.all([api('GET', '/api/scripts'), api('GET', '/api/agents')]);
   const targets = agents.filter((a) => agentIds.includes(a.id));
   const platforms = new Set(targets.map((t) => t.platform));
-  const compatible = (shell) => SHELL_OS[shell] === 'any' || platforms.has(SHELL_OS[shell]);
+  const compatible = (shell) => (SHELL_OS[shell] || []).some((p) => platforms.has(p));
   const shellOpts = Object.keys(SHELL_OS).filter(compatible);
   const m = openModal(`Run on ${targets.length === 1 ? targets[0].hostname : targets.length + ' devices'}`, `
     <div class="tabs"><a href="#" class="active" data-mode="library">From library</a><a href="#" data-mode="adhoc">Ad-hoc command</a></div>
@@ -2245,6 +2249,7 @@ function installCommands(server, token) {
   return {
     windows: `irm '${server}/install/windows?token=${token}' | iex`,
     linux: `curl -fsSL '${server}/install/linux?token=${token}' | sudo bash`,
+    macos: `curl -fsSL '${server}/install/macos?token=${token}' | sudo bash`,
   };
 }
 
@@ -2269,14 +2274,23 @@ async function pageClient(view, id) {
           <a class="btn" href="${esc(dlUrl(c.server_url, latest.token, 'hostpilot-install.sh'))}">⬇ Linux installer (.sh)</a>
           <button class="btn sm" data-action="copy" data-text="${esc(dlUrl(c.server_url, latest.token, 'hostpilot-install.sh'))}">Copy link</button>
         </div>
+        <div class="row field">
+          <a class="btn primary" href="${esc(dlUrl(c.server_url, latest.token, 'HostPilot-Installer.pkg'))}">⬇ macOS installer (.pkg)</a>
+          <button class="btn sm" data-action="copy" data-text="${esc(dlUrl(c.server_url, latest.token, 'HostPilot-Installer.pkg'))}">Copy link</button>
+          <span style="width:12px"></span>
+          <a class="btn" href="${esc(dlUrl(c.server_url, latest.token, 'hostpilot-install-macos.sh'))}">⬇ macOS install script (.sh)</a>
+          <button class="btn sm" data-action="copy" data-text="${esc(dlUrl(c.server_url, latest.token, 'hostpilot-install-macos.sh'))}">Copy link</button>
+        </div>
         <p class="small muted">Email the link to the client. Windows: double-click the .exe and approve the admin prompt. It isn't code-signed, so SmartScreen may warn
-          ("More info → Run anyway"); <code>HostPilot-Setup.exe /quiet</code> installs silently (e.g. via GPO/Intune). Linux: <code>sudo bash hostpilot-install.sh</code>.
+          ("More info → Run anyway"); <code>HostPilot-Setup.exe /quiet</code> installs silently (e.g. via GPO/Intune). Linux: <code>sudo bash hostpilot-install.sh</code>. macOS (10.15 Catalina or newer): open the .pkg; it isn't signed, so the first time right-click it → <strong>Open</strong> → Open (or System Preferences → Security &amp; Privacy → Open Anyway). Silent: <code>sudo installer -pkg HostPilot-Installer.pkg -target /</code>.
           Links stop working when the token expires or is revoked.</p>
         <h3>Or use a one-line command</h3>
         <label>Windows: elevated PowerShell (Windows 10 / Server 2016 or newer)</label>
         <div class="copybox field"><code>${esc(cmds.windows)}</code><button class="btn" data-action="copy" data-text="${esc(cmds.windows)}">Copy</button></div>
         <label>Linux: any systemd distro, as root</label>
         <div class="copybox field"><code>${esc(cmds.linux)}</code><button class="btn" data-action="copy" data-text="${esc(cmds.linux)}">Copy</button></div>
+        <label>macOS: Terminal (10.15 Catalina or newer)</label>
+        <div class="copybox field"><code>${esc(cmds.macos)}</code><button class="btn" data-action="copy" data-text="${esc(cmds.macos)}">Copy</button></div>
         ${c.server_url.startsWith('http://') && !/localhost|127\.0\.0\.1/.test(c.server_url) ? '<p class="small" style="color:var(--warn)">⚠ The server is being reached over plain HTTP. Put it behind HTTPS (see README) before enrolling hosts over the internet.</p>' : ''}`
       : '<p class="muted">No active enrollment token. Create one to get install commands.</p>'}
       <details ${cmds ? '' : 'open'}><summary class="small">Manage enrollment tokens (${tokens.length} active)</summary>
@@ -2314,18 +2328,18 @@ async function pageScripts(view) {
   const cats = [...new Set(scripts.map((s) => s.category))];
   view.innerHTML = `<div class="page-head"><h1>Script library</h1>${can('tech') ? '<a class="btn primary" href="#/scripts/new">+ New script</a>' : ''}</div>
     <div class="toolbar"><input type="search" id="sc-q" placeholder="Filter scripts…">
-      <select id="sc-os"><option value="">All platforms</option><option value="windows">Windows</option><option value="linux">Linux</option></select></div>
+      <select id="sc-os"><option value="">All platforms</option><option value="windows">Windows</option><option value="linux">Linux</option><option value="macos">macOS</option></select></div>
     <div id="sc-list"></div>`;
   const draw = () => {
     const q = $('#sc-q').value.toLowerCase();
     const os = $('#sc-os').value;
-    const vis = scripts.filter((s) => (!q || `${s.name} ${s.description} ${s.category}`.toLowerCase().includes(q)) && (!os || SHELL_OS[s.shell] === os || SHELL_OS[s.shell] === 'any'));
+    const vis = scripts.filter((s) => (!q || `${s.name} ${s.description} ${s.category}`.toLowerCase().includes(q)) && (!os || (SHELL_OS[s.shell] || []).includes(os)));
     $('#sc-list').innerHTML = cats.map((cat) => {
       const rows = vis.filter((s) => s.category === cat);
       if (!rows.length) return '';
       return `<h3 style="margin-top:18px">${esc(cat)}</h3><div class="card flush"><div class="table-wrap"><table><tbody>
         ${rows.map((s) => `<tr class="clickable" data-href="#/scripts/${s.id}"><td style="width:34%"><strong>${esc(s.name)}</strong></td>
-          <td><span class="os">${ICONS[SHELL_OS[s.shell]] || ''}${esc(s.shell)}</span></td><td class="small muted">${esc(s.description)}</td><td class="small nowrap">${s.timeout}s</td></tr>`).join('')}
+          <td><span class="os">${shellIcon(s.shell)}${esc(s.shell)}</span></td><td class="small muted">${esc(s.description)}</td><td class="small nowrap">${s.timeout}s</td></tr>`).join('')}
         </tbody></table></div></div>`;
     }).join('') || '<div class="card muted">No scripts match.</div>';
   };
@@ -2502,12 +2516,13 @@ async function pageSettings(view) {
     ${admin ? `<form class="card" id="set-form"><h2>Monitoring & alerting</h2>
       <div class="form-grid">${num('cpu_threshold', 'CPU alert %', '3-check average; 0 disables')}${num('mem_threshold', 'Memory alert %')}${num('disk_threshold', 'Disk alert %')}${num('offline_minutes', 'Offline alert after (min)')}</div>
       <div class="form-grid">${num('checkin_seconds', 'Agent check-in (sec)')}${num('inventory_hours', 'Inventory refresh (hours)')}${num('update_scan_hours', 'OS update scan (hours)', '0 disables automatic scans')}${num('metric_retention_days', 'Keep metrics (days)')}${num('job_retention_days', 'Keep job output (days)')}</div>
-      <div class="field"><label>Windows taskbar icon</label><select name="tray_icon" style="width:auto">
+      <div class="field"><label>Taskbar / tray icon (Windows and Linux desktops)</label><select name="tray_icon" style="width:auto">
         <option value="1" ${s.tray_icon ? 'selected' : ''}>Show the HostPilot status icon to logged-in users</option>
         <option value="0" ${s.tray_icon ? '' : 'selected'}>Hidden (removed from devices on their next check-in)</option></select></div>
       <div class="form-grid">
         <div class="field"><label>Services monitored on all Windows devices</label><input type="text" name="watch_services_windows" value="${esc(s.watch_services_windows)}" placeholder="e.g. Spooler, WinDefend"></div>
-        <div class="field"><label>Services monitored on all Linux devices</label><input type="text" name="watch_services_linux" value="${esc(s.watch_services_linux)}" placeholder="e.g. sshd, cron"></div></div>
+        <div class="field"><label>Services monitored on all Linux devices</label><input type="text" name="watch_services_linux" value="${esc(s.watch_services_linux)}" placeholder="e.g. sshd, cron"></div>
+        <div class="field"><label>Services monitored on all Macs (launchd labels)</label><input type="text" name="watch_services_macos" value="${esc(s.watch_services_macos)}" placeholder="e.g. com.openssh.sshd"></div></div>
       <div class="small muted" style="margin:-6px 0 12px">Comma separated service names. A critical alert opens when one stops and resolves when it runs again.</div>
       <div class="field"><label>Alert webhook URL</label><input name="webhook_url" type="url" value="${esc(s.webhook_url)}" placeholder="https://hooks.slack.com/… or Discord / Teams / ntfy webhook"></div>
       <div class="row"><button class="btn primary">Save settings</button><button type="button" class="btn" data-action="test-webhook">Send test</button></div>
