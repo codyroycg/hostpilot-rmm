@@ -2,6 +2,9 @@ services:
   hostpilot:
     build: .
     image: hostpilot-rmm:latest
+    # Rebuild the image on every deploy. Without this, "docker compose up"
+    # (and Dockhand's redeploy) keeps running the old hostpilot-rmm:latest image.
+    pull_policy: build
     container_name: hostpilot
     restart: unless-stopped
     # Values come from a .env file next to this file, or from your stack

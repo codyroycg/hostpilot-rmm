@@ -30,13 +30,15 @@ function serveStatic(req, res, pathname) {
   let rel = pathname === '/' ? '/index.html' : pathname;
   let file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR)) return false;
-  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) return false;
-  const data = fs.readFileSync(file);
-  res.writeHead(200, {
-    'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-    'Cache-Control': rel === '/index.html' ? 'no-cache' : 'public, max-age=300',
-  });
-  res.end(data);
+  if (!fs.existsSync(file)) return false;
+  const st = fs.statSync(file);
+  if (st.isDirectory()) return false;
+  // Always revalidate so a redeploy shows up immediately; unchanged files get a cheap 304.
+  const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+  const headers = { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag };
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); res.end(); return true; }
+  res.writeHead(200, headers);
+  res.end(fs.readFileSync(file));
   return true;
 }
 
