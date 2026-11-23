@@ -7,6 +7,9 @@ import { get, run, tx, getSettings } from './db.js';
 import { HttpError, uuid, randHex, sha256, safeEqualHex, truncate, clampInt } from './util.js';
 import { addWaiter, claimJobs } from './jobs.js';
 import { evaluateThresholds, resolveAlert } from './alerts.js';
+import { onJobFinished } from './job-results.js';
+import { checkToken, receiveInto, sendFile } from './transfers.js';
+import { hostInput, hostOutput, hostClose } from './terminal.js';
 
 const AGENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 
@@ -191,5 +194,62 @@ route('POST', '/api/agent/result', (ctx) => {
   const status = b.timed_out ? 'timeout' : code === 0 ? 'success' : 'failed';
   run('UPDATE jobs SET status=?, exit_code=?, stdout=?, stderr=?, finished_at=? WHERE id=?',
     status, code, stdout, stderr, Date.now(), job.id);
+  onJobFinished(job.id);
   return { ok: true };
+});
+
+// ---------- file transfers (device side; authorised by the per-transfer token) ----------
+
+route('PUT', '/api/transfer/:id', async (ctx) => {
+  const t = checkToken(ctx.params.id, ctx.query.get('token'));
+  if (t.direction !== 'to-server' || t.ready) throw new HttpError(409, 'Transfer already completed');
+  await receiveInto(t, ctx.req);
+  return { ok: true, size: t.size };
+}, { raw: true });
+
+route('GET', '/api/transfer/:id', (ctx) => {
+  const t = checkToken(ctx.params.id, ctx.query.get('token'));
+  if (t.direction !== 'to-device') throw new HttpError(409, 'Wrong direction');
+  return sendFile(t, ctx.res, { attachment: false });
+});
+
+// ---------- terminal streams (device side) ----------
+
+route('GET', '/api/term/:id/in', (ctx) => hostInput(ctx));
+route('POST', '/api/term/:id/out', (ctx) => hostOutput(ctx), { raw: true });
+route('POST', '/api/term/:id/close', (ctx) => hostClose(ctx), { raw: true });
+
+// ---------- downloadable installers ----------
+// /download/<enrollment token>/<file>: the token is the secret (same as the one-line install commands),
+// so these links can be emailed to a client.
+
+const SETUP_STUB = path.join(AGENT_DIR, 'HostPilotSetup.exe');
+const CONFIG_MARKER = '##HOSTPILOT-CONFIG##';
+
+route('GET', '/download/:token/:file', (ctx) => {
+  const token = ctx.params.token;
+  if (!validToken(token)) throw new HttpError(403, 'This download link has expired or was revoked.');
+  const server = publicUrl(ctx.req);
+  let buf, type = 'application/octet-stream';
+  switch (ctx.params.file) {
+    case 'HostPilot-Setup.exe': {
+      if (!fs.existsSync(SETUP_STUB)) throw new HttpError(404, 'Setup stub missing from server/agents');
+      buf = Buffer.concat([fs.readFileSync(SETUP_STUB), Buffer.from(`\n${CONFIG_MARKER}${server}\n${token}\n`, 'utf8')]);
+      break;
+    }
+    case 'hostpilot-install.sh':
+      buf = Buffer.from(INSTALLERS.linux.replaceAll('__SERVER_URL__', server).replaceAll('__TOKEN__', token));
+      type = 'text/x-shellscript';
+      break;
+    case 'hostpilot-install.ps1':
+      buf = Buffer.from(INSTALLERS.windows.replaceAll('__SERVER_URL__', server).replaceAll('__TOKEN__', token));
+      break;
+    default:
+      throw new HttpError(404, 'Not found');
+  }
+  ctx.res.writeHead(200, {
+    'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control': 'no-store',
+    'Content-Disposition': `attachment; filename="${ctx.params.file}"`,
+  });
+  ctx.res.end(buf);
 });

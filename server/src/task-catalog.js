@@ -1,0 +1,163 @@
+// Built-in device tasks (files, updates, software, users, terminal).
+// Each task is a PowerShell/bash template in ../task-scripts; the server injects validated arguments
+// (base64-encoded, so no quoting/injection issues) and queues it as a normal job.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { HttpError } from './util.js';
+
+const DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'task-scripts');
+const TEMPLATES = new Map();
+for (const f of fs.readdirSync(DIR)) {
+  TEMPLATES.set(f, fs.readFileSync(path.join(DIR, f), 'utf8').replace(/\r\n/g, '\n'));
+}
+
+function expand(name, depth = 0) {
+  const t = TEMPLATES.get(name);
+  if (t == null || depth > 3) return null;
+  return t.replace(/^#__INCLUDE:([\w.-]+)__$/gm, (_, inc) => {
+    const body = expand(inc, depth + 1);
+    if (body == null) throw new Error(`missing include ${inc}`);
+    return body;
+  });
+}
+
+// ---------- validation helpers ----------
+const S = (v, max = 4096) => String(v ?? '').replace(/\0/g, '').slice(0, max);
+const need = (v, label) => { if (!v) throw new HttpError(400, `${label} is required`); return v; };
+const flag = (v) => (v === true || v === '1' || v === 1 ? '1' : v === false || v === '0' || v === 0 ? '0' : '');
+const WIN_USER = /^[^"/\\[\]:;|=,+*?<>@]{1,20}$/;
+const LIN_USER = /^[a-z_][a-z0-9_.-]{0,31}$/;
+const LIN_PKG = /^[A-Za-z0-9][A-Za-z0-9.+_:@~-]{0,200}$/;
+const WINGET_ID = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,200}$/;
+
+function userName(a, platform) {
+  const n = need(S(a.name, 64).trim(), 'Username');
+  if (!(platform === 'windows' ? WIN_USER : LIN_USER).test(n)) throw new HttpError(400, `"${n}" is not a valid username`);
+  return n;
+}
+function pkg(a, platform, key = 'name') {
+  const n = need(S(a[key], 300).trim(), 'Package');
+  if (platform === 'linux' && !LIN_PKG.test(n)) throw new HttpError(400, `"${n}" is not a valid package name`);
+  return n;
+}
+function password(a, required) {
+  const p = S(a.password, 256);
+  if (required && !p) throw new HttpError(400, 'Password is required');
+  if (p && p.length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+  return p;
+}
+const base = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || p;
+
+/**
+ * title(args) -> job name; args(raw, platform) -> validated {key: string}; timeout seconds;
+ * wait: seconds the API call waits for a result (0 = return immediately);
+ * secret: arg names masked in job history; internal: only queued by the server itself.
+ */
+export const TASKS = {
+  'files.list': { title: (a) => `Browse ${a.path || 'drives'}`, timeout: 60, wait: 45, args: (a) => ({ path: S(a.path) }) },
+  'files.delete': { title: (a) => `Delete ${a.path}`, timeout: 900, wait: 60, args: (a) => ({ path: need(S(a.path), 'Path') }) },
+  'files.rename': {
+    title: (a) => `Rename ${a.path} to ${a.to}`, timeout: 120, wait: 45,
+    args: (a) => {
+      const to = need(S(a.to, 255).trim(), 'New name');
+      if (/[\\/:*?"<>|]/.test(to)) throw new HttpError(400, 'Name contains characters that are not allowed');
+      return { path: need(S(a.path), 'Path'), to };
+    },
+  },
+  'files.mkdir': { title: (a) => `New folder ${a.path}`, timeout: 60, wait: 45, args: (a) => ({ path: need(S(a.path), 'Path') }) },
+  'files.get': { internal: true, title: (a) => `Download ${a.path}`, timeout: 7200, args: (a) => ({ path: S(a.path), url: S(a.url) }) },
+  'files.put': { internal: true, title: (a) => `Upload to ${a.path}`, timeout: 7200, args: (a) => ({ path: S(a.path), url: S(a.url) }) },
+
+  'updates.scan': { title: () => 'Scan for OS updates', timeout: 3600, wait: 0, args: () => ({}) },
+  'updates.install': {
+    title: (a) => (a.ids === 'all' ? 'Install all OS updates' : `Install ${a.ids.split(',').length} OS update(s)`) + (a.reboot === '1' ? ' + reboot' : ''),
+    timeout: 14400, wait: 0,
+    args: (a) => {
+      let ids = 'all';
+      if (a.ids && a.ids !== 'all') {
+        const list = (Array.isArray(a.ids) ? a.ids : String(a.ids).split(',')).map((x) => String(x).trim()).filter((x) => /^[\w.+:@~-]{1,200}$/.test(x));
+        if (!list.length) throw new HttpError(400, 'No valid updates selected');
+        ids = list.join(',');
+      }
+      return { ids, reboot: flag(a.reboot) || '0' };
+    },
+  },
+
+  'software.uninstall': { title: (a) => `Uninstall ${a.name}`, timeout: 3600, wait: 0, args: (a, p) => ({ name: pkg(a, p) }) },
+  'software.reinstall': { title: (a) => `Reinstall ${a.name}`, timeout: 3600, wait: 0, args: (a, p) => ({ name: pkg(a, p) }) },
+  'software.install': {
+    title: (a) => `Install ${a.id}`, timeout: 3600, wait: 0,
+    args: (a, p) => {
+      const id = need(S(a.id, 200).trim(), 'Package');
+      if (!(p === 'windows' ? WINGET_ID : LIN_PKG).test(id)) throw new HttpError(400, `"${id}" is not a valid ${p === 'windows' ? 'winget ID' : 'package name'}`);
+      return { id };
+    },
+  },
+  'software.search': { title: (a) => `Search packages: ${a.query}`, timeout: 180, wait: 120, args: (a) => ({ query: need(S(a.query, 100).trim(), 'Search text') }) },
+
+  'users.list': { title: () => 'List local users', timeout: 120, wait: 60, args: () => ({}) },
+  'users.create': {
+    title: (a) => `Create user ${a.name}`, timeout: 120, wait: 60, secret: ['password'],
+    args: (a, p) => ({ name: userName(a, p), password: password(a, true), fullname: S(a.fullname, 100), admin: flag(a.admin) || '0', must_change: flag(a.must_change) || '0' }),
+  },
+  'users.update': {
+    title: (a) => `Modify user ${a.name}`, timeout: 120, wait: 60, secret: ['password'],
+    args: (a, p) => ({
+      name: userName(a, p), password: password(a, false), enabled: flag(a.enabled), admin: flag(a.admin),
+      fullname: S(a.fullname, 100), fullname_set: a.fullname === undefined ? '0' : '1', must_change: flag(a.must_change) || '0',
+    }),
+  },
+  'users.delete': {
+    title: (a) => `Delete user ${a.name}`, timeout: 600, wait: 90,
+    args: (a, p) => {
+      const name = userName(a, p);
+      if (p === 'linux' && name === 'root') throw new HttpError(400, "Refusing to delete root");
+      return { name, remove_home: flag(a.remove_home) || '0' };
+    },
+  },
+
+  'terminal.open': { internal: true, title: () => 'Terminal session', timeout: 12 * 3600, args: (a) => ({ in: S(a.in), out: S(a.out), close: S(a.close) }) },
+};
+
+export function getTask(task, { allowInternal = false } = {}) {
+  const def = TASKS[task];
+  if (!def || (def.internal && !allowInternal)) throw new HttpError(400, `Unknown task ${task}`);
+  return def;
+}
+
+const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
+
+function argsBlock(args, platform) {
+  if (platform === 'windows') {
+    return ['$A = @{}', ...Object.entries(args).map(([k, v]) => `$A['${k}'] = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(v)}'))`)].join('\n');
+  }
+  return Object.entries(args).map(([k, v]) => `A_${k}="$(printf '%s' '${b64(v)}' | base64 -d)"`).join('\n');
+}
+
+function displayBlock(args, secret = []) {
+  return ['# Arguments:', ...Object.entries(args).map(([k, v]) => `#   ${k} = ${secret.includes(k) && v ? '********' : String(v).replace(/\n/g, ' ')}`)].join('\n');
+}
+
+const PS_PRELUDE = "$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12\n";
+
+/** Returns {shell, body, displayBody, name, timeout} or null when the task has no script for this platform. */
+export function buildTask(task, platform, rawArgs = {}, opts = {}) {
+  const def = getTask(task, opts);
+  const ext = platform === 'windows' ? 'ps1' : 'sh';
+  const tpl = expand(`${task}.${ext}`);
+  if (tpl == null) return null;
+  const args = def.args(rawArgs || {}, platform);
+  const prelude = platform === 'windows' ? PS_PRELUDE : '';
+  return {
+    shell: platform === 'windows' ? 'powershell' : 'bash',
+    body: prelude + tpl.replaceAll('#__ARGS__', argsBlock(args, platform)),
+    displayBody: prelude + tpl.replaceAll('#__ARGS__', displayBlock(args, def.secret)),
+    name: def.title(args),
+    timeout: def.timeout,
+    args,
+  };
+}
+
+export const supportsTask = (task, platform) => TEMPLATES.has(`${task}.${platform === 'windows' ? 'ps1' : 'sh'}`);
+export { base as baseName };

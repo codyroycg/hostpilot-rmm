@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Terminal · HostPilot RMM</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+</head>
+<body class="remote-body">
+  <header class="rbar">
+    <div class="row">
+      <img src="/favicon.svg" alt="" width="22" height="22">
+      <strong id="t-host">Connecting…</strong>
+      <span class="badge info" id="t-status">starting</span>
+      <span class="small muted">root shell</span>
+    </div>
+    <div class="row">
+      <button class="btn sm" id="t-paste" title="Paste from clipboard">Paste</button>
+      <button class="btn sm" id="t-fs">Fullscreen</button>
+      <button class="btn sm danger" id="t-end">Disconnect</button>
+    </div>
+  </header>
+  <div class="tstage" id="t-stage">
+    <div id="t-term"></div>
+    <div class="roverlay" id="t-overlay">Starting terminal…</div>
+  </div>
+  <script src="/vendor/xterm.js"></script>
+  <script src="/vendor/addon-fit.js"></script>
+  <script type="module" src="/terminal.js"></script>
+</body>
+</html>

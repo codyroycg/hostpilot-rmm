@@ -1,9 +1,12 @@
 import { route, clientIp, publicUrl } from './router.js';
 import { all, get, run, tx, getSettings, saveSettings, audit, SETTING_DEFAULTS } from './db.js';
 import { HttpError, randHex, sha256, hashPassword, verifyPassword, SHELLS, clampInt } from './util.js';
-import { queueJobs, isPolling } from './jobs.js';
+import { queueJobs, isPolling, waitForJob } from './jobs.js';
 import { AGENT_VERSIONS } from './agent-routes.js';
 import { createRemoteSession } from './remote.js';
+import { createTerminalSession } from './terminal.js';
+import { getTask, buildTask, baseName } from './task-catalog.js';
+import { createTransfer, getTransfer, receiveInto, sendFile, removeTransfer } from './transfers.js';
 
 const SESSION_COOKIE = 'hp_session';
 const SESSION_TTL = 12 * 3600 * 1000;
@@ -349,6 +352,8 @@ route('GET', '/api/jobs/:id', (ctx) => {
   need(ctx);
   const j = get('SELECT j.*, a.hostname FROM jobs j JOIN agents a ON a.id=j.agent_id WHERE j.id=?', ctx.params.id);
   if (!j) throw new HttpError(404, 'Job not found');
+  if (j.display_body != null) j.body = j.display_body; // never show injected secrets
+  delete j.display_body;
   return j;
 });
 
@@ -562,6 +567,127 @@ route('DELETE', '/api/users/:id', (ctx) => {
 route('GET', '/api/audit', (ctx) => {
   need(ctx, 'admin');
   return all('SELECT * FROM audit ORDER BY id DESC LIMIT 500');
+});
+
+// ---------- device tasks (files, updates, software, users) ----------
+
+function jobView(id) {
+  const j = get(`SELECT id, batch_id, agent_id, name, task, shell, status, exit_code, stdout, stderr, created_at, sent_at, finished_at
+                 FROM jobs WHERE id=?`, id);
+  return j;
+}
+
+const isOnline = (a) => isPolling(a.id) || (a.last_seen && Date.now() - a.last_seen < ONLINE_WINDOW);
+
+async function runTask(u, a, task, args, { wait = true, allowInternal = false } = {}) {
+  const def = getTask(task, { allowInternal });
+  if (def.wait && wait && !isOnline(a)) throw new HttpError(409, `${a.hostname} is offline`);
+  let title = task;
+  const r = queueJobs({
+    agents: [a], name: task, task, timeout: def.timeout, createdBy: u.username,
+    build: (ag) => { const b = buildTask(task, ag.platform, args, { allowInternal }); if (b) title = b.name; return b; },
+  });
+  if (!r.created) throw new HttpError(400, `This action isn't available on ${a.platform}`);
+  const jobId = r.jobs[0].id;
+  if (!/^(files\.list|users\.list|software\.search)$/.test(task)) audit(u.username, `task.${task}`, `${a.hostname}: ${title}`);
+  if (wait && def.wait) await waitForJob(jobId, def.wait * 1000);
+  return jobView(jobId);
+}
+
+route('POST', '/api/agents/:id/task', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  return runTask(u, a, String(ctx.body.task || ''), ctx.body.args || {}, { wait: ctx.body.wait !== false });
+});
+
+// Same task on many devices (no waiting) -> batch page
+route('POST', '/api/tasks', (ctx) => {
+  const u = need(ctx, 'tech');
+  const { task, args = {} } = ctx.body;
+  const def = getTask(String(task || ''));
+  const ids = Array.isArray(ctx.body.agent_ids) ? ctx.body.agent_ids.map(String) : [];
+  const agents = ids.map((id) => get('SELECT id, hostname, platform FROM agents WHERE id=?', id)).filter(Boolean);
+  if (!agents.length) throw new HttpError(400, 'Select at least one device');
+  // validate once per platform up front so errors surface instead of silently skipping
+  for (const p of new Set(agents.map((a) => a.platform))) buildTask(task, p, args);
+  let name = task;
+  const r = queueJobs({
+    agents, name, task, timeout: def.timeout, createdBy: u.username,
+    build: (a) => { const b = buildTask(task, a.platform, args); if (b) name = b.name; return b; },
+  });
+  audit(u.username, `task.${task}`, `${name} on ${r.created} device(s)`);
+  return r;
+});
+
+// ---------- files ----------
+
+route('POST', '/api/agents/:id/files/download', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  const p = String(ctx.body.path || '');
+  if (!p) throw new HttpError(400, 'Path is required');
+  let name = baseName(p).replace(/:$/, '');
+  if (ctx.body.is_dir) name += a.platform === 'windows' ? '.zip' : '.tar.gz';
+  const t = createTransfer({ agentId: a.id, userId: u.id, direction: 'to-server', name });
+  const job = await runTask(u, a, 'files.get', { path: p, url: `/api/transfer/${t.id}?token=${t.token}` }, { wait: false, allowInternal: true });
+  return { transfer_id: t.id, job };
+});
+
+route('GET', '/api/transfers/:id', (ctx) => {
+  const u = need(ctx, 'tech');
+  const t = getTransfer(ctx.params.id);
+  if (!t || t.userId !== u.id || t.direction !== 'to-server') throw new HttpError(404, 'Transfer not found');
+  if (!t.ready) return { ready: false };
+  if (ctx.query.get('check') === '1') return { ready: true, size: t.size, name: t.name };
+  return sendFile(t, ctx.res, { attachment: true }).then(() => removeTransfer(t));
+});
+
+route('POST', '/api/agents/:id/files/upload', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  const dest = String(ctx.query.get('path') || '');
+  if (!dest) throw new HttpError(400, 'Destination path is required');
+  const t = createTransfer({ agentId: a.id, userId: u.id, direction: 'to-device', name: baseName(dest) });
+  await receiveInto(t, ctx.req);
+  const job = await runTask(u, a, 'files.put', { path: dest, url: `/api/transfer/${t.id}?token=${t.token}` }, { wait: false, allowInternal: true });
+  setTimeout(() => removeTransfer(t), 3 * 3600 * 1000).unref();
+  return { job, size: t.size };
+}, { raw: true });
+
+// ---------- OS updates / patching ----------
+
+route('GET', '/api/agents/:id/updates', (ctx) => {
+  need(ctx);
+  const a = loadAgent(ctx.params.id);
+  const running = get(`SELECT id, task, status FROM jobs WHERE agent_id=? AND task IN ('updates.scan','updates.install')
+                       AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`, a.id);
+  return {
+    checked_at: a.updates_checked_at, reboot_required: !!a.reboot_required, running: running || null,
+    updates: all('SELECT uid, kb, title, severity, category, size FROM updates WHERE agent_id=? ORDER BY severity DESC, title', a.id),
+  };
+});
+
+route('GET', '/api/patching', (ctx) => {
+  need(ctx);
+  const busy = new Map(all(`SELECT agent_id, task FROM jobs WHERE task IN ('updates.scan','updates.install')
+                            AND status IN ('queued','running')`).map((r) => [r.agent_id, r.task]));
+  return all(`${AGENT_SELECT} ORDER BY a.hostname COLLATE NOCASE`).map((a) => {
+    const p = presentAgent(a);
+    return {
+      id: p.id, hostname: p.hostname, client_name: p.client_name, platform: p.platform, os_name: p.os_name, online: p.online,
+      maintenance: p.maintenance, updates_checked_at: p.updates_checked_at, pending_updates: p.pending_updates,
+      security_updates: p.security_updates, reboot_required: !!p.reboot_required, busy: busy.get(p.id) || null,
+    };
+  });
+});
+
+// ---------- terminal (Linux) ----------
+
+route('POST', '/api/agents/:id/terminal', (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  if (a.platform !== 'linux') throw new HttpError(400, 'Terminal sessions are available for Linux devices');
+  return createTerminalSession({ id: a.id, hostname: a.hostname, platform: a.platform }, u);
 });
 
 // Bootstrap the first admin account.

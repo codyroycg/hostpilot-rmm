@@ -7,6 +7,8 @@ SELF="$BASE/agent.sh"
 # shellcheck disable=SC1091
 source "$BASE/config.env"
 SERVER="${SERVER%/}"
+# inherited by job processes (file transfers / terminal need to know where the server is)
+export HOSTPILOT_SERVER="$SERVER"
 MY_VERSION="$(sha256sum "$SELF" | cut -c1-12)"
 JOBDIR="$BASE/jobs"
 LOG="$BASE/agent.log"

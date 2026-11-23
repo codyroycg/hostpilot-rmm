@@ -2,10 +2,11 @@ import { HttpError } from './util.js';
 
 const routes = [];
 
-export function route(method, pattern, handler) {
+/** opts.raw: don't parse the body (handler streams ctx.req itself) */
+export function route(method, pattern, handler, opts = {}) {
   const keys = [];
   const re = new RegExp('^' + pattern.replace(/:(\w+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '/?$');
-  routes.push({ method, re, keys, handler });
+  routes.push({ method, re, keys, handler, opts });
 }
 
 export function match(method, pathname) {
@@ -16,7 +17,7 @@ export function match(method, pathname) {
     if (r.method !== method) { methodMismatch = true; continue; }
     const params = {};
     r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
-    return { handler: r.handler, params };
+    return { handler: r.handler, params, opts: r.opts };
   }
   if (methodMismatch) throw new HttpError(405, 'Method not allowed');
   return null;

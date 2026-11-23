@@ -1,6 +1,23 @@
 import { all, run, getSettings } from './db.js';
 import { queueJobs, isPolling } from './jobs.js';
 import { openAlert } from './alerts.js';
+import { buildTask } from './task-catalog.js';
+
+// Periodically scan online devices for OS updates (a few at a time).
+function autoUpdateScan() {
+  const { update_scan_hours } = getSettings();
+  if (!update_scan_hours) return;
+  const cutoff = Date.now() - update_scan_hours * 3600000;
+  const due = all(`SELECT id, hostname, platform FROM agents a WHERE (updates_checked_at IS NULL OR updates_checked_at < ?)
+                   AND last_seen > ? AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.agent_id=a.id
+                   AND j.task IN ('updates.scan','updates.install') AND (j.status IN ('queued','running') OR j.created_at > ?))
+                   LIMIT 10`, cutoff, Date.now() - 3 * 60000, Date.now() - 6 * 3600000);
+  if (!due.length) return;
+  queueJobs({
+    agents: due, name: 'Scan for OS updates', task: 'updates.scan', timeout: 3600, createdBy: 'scheduler',
+    build: (a) => buildTask('updates.scan', a.platform, {}),
+  });
+}
 
 function targetsFor(s) {
   switch (s.target_type) {
@@ -48,6 +65,8 @@ function expireJobs() {
   run(`UPDATE jobs SET status='lost', finished_at=?, stderr='No result received from agent'
        WHERE status='running' AND sent_at < ? - (timeout + 600) * 1000`, t, t);
   run("UPDATE jobs SET status='expired', finished_at=? WHERE status='queued' AND created_at < ?", t, t - 7 * 86400000);
+  // jobs that ended without a result (cancelled/lost/expired) still hold their injected arguments: scrub them
+  run("UPDATE jobs SET body=display_body, display_body=NULL WHERE display_body IS NOT NULL AND status NOT IN ('queued','running')");
 }
 
 function prune() {
@@ -69,5 +88,7 @@ export function startBackgroundTasks() {
   setInterval(safe('offline', checkOffline), 60_000);
   setInterval(safe('expire', expireJobs), 60_000);
   setInterval(safe('prune', prune), 3600_000);
+  setInterval(safe('update-scan', autoUpdateScan), 5 * 60_000);
+  setTimeout(safe('update-scan', autoUpdateScan), 90_000);
   setTimeout(safe('prune', prune), 10_000);
 }

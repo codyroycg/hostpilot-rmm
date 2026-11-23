@@ -140,7 +140,7 @@ function chart(rows, series, { hours = 24 } = {}) {
 // ---------------- layout & routing ----------------
 const NAV = [
   ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/alerts', 'Alerts', 'alerts'],
-  null, ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'],
+  null, ['#/patching', 'Patching'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'],
   null, ['#/settings', 'Settings'],
 ];
 
@@ -179,6 +179,7 @@ const ROUTES = [
   [/^#\/scripts$/, pageScripts, 'Scripts'],
   [/^#\/scripts\/(new|\d+)$/, pageScriptEdit, 'Script'],
   [/^#\/automation$/, pageAutomation, 'Automation'],
+  [/^#\/patching$/, pagePatching, 'Patching'],
   [/^#\/jobs$/, pageJobs, 'Job history'],
   [/^#\/jobs\/batch\/([\w-]+)$/, pageBatch, 'Job results'],
   [/^#\/alerts$/, pageAlerts, 'Alerts'],
@@ -267,7 +268,10 @@ async function pageDevices(view) {
   view.innerHTML = `
     <div class="page-head"><h1>Devices</h1>
       <div class="row">
-        ${can('tech') ? '<button class="btn primary" data-action="run-selected" id="run-sel" disabled>Run script on selected</button>' : ''}
+        ${can('tech') ? `<select id="bulk-sel" style="width:auto" disabled><option value="">More actions…</option>
+          <option value="scan">Scan for OS updates</option><option value="patch">Install all OS updates</option>
+          <option value="patch-reboot">Install all OS updates + reboot if required</option><option value="software">Install software…</option></select>
+          <button class="btn primary" data-action="run-selected" id="run-sel" disabled>Run script on selected</button>` : ''}
         <a class="btn" href="#/clients">+ Add devices</a></div></div>
     <div class="toolbar">
       <input type="search" id="dev-q" placeholder="Search hostname, IP, user, OS…" value="${esc(f.q)}">
@@ -313,6 +317,8 @@ async function pageDevices(view) {
     for (const id of [...state.selected]) if (!ids.has(id)) state.selected.delete(id);
     const b = $('#run-sel');
     if (b) { b.disabled = !state.selected.size; b.textContent = `Run script on selected${state.selected.size ? ` (${state.selected.size})` : ''}`; }
+    const bs = $('#bulk-sel');
+    if (bs) bs.disabled = !state.selected.size;
     const vis = filtered();
     $('#dev-all').checked = vis.length > 0 && vis.every((a) => state.selected.has(a.id));
   };
@@ -330,6 +336,20 @@ async function pageDevices(view) {
     for (const a of filtered()) e.target.checked ? state.selected.add(a.id) : state.selected.delete(a.id);
     drawRows();
   });
+  $('#bulk-sel')?.addEventListener('change', guard(async (e) => {
+    const op = e.target.value;
+    e.target.value = '';
+    const ids = [...state.selected];
+    if (!op || !ids.length) return;
+    if (op === 'software') { await bulkSoftwareModal(ids); return; }
+    const label = { scan: 'Scan for OS updates', patch: 'Install all OS updates', 'patch-reboot': 'Install all OS updates and reboot where required' }[op];
+    if (!await confirmDialog(`${label} on ${ids.length} device(s)?`, { okLabel: 'Go' })) return;
+    const r = await api('POST', '/api/tasks', op === 'scan'
+      ? { agent_ids: ids, task: 'updates.scan' }
+      : { agent_ids: ids, task: 'updates.install', args: { ids: 'all', reboot: op === 'patch-reboot' } });
+    toast(`Queued on ${r.created} device(s)`);
+    location.hash = `#/jobs/batch/${r.batch_id}`;
+  }));
   await load();
   every(15000, load);
 }
@@ -337,17 +357,22 @@ async function pageDevices(view) {
 // ---------------- device detail ----------------
 async function pageDevice(view, id, tab = 'overview') {
   const a = await api('GET', `/api/agents/${id}`);
-  const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['jobs', 'Script history'], ['software', 'Software'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+  const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['updates', 'Updates'], ['software', 'Software'],
+    ['users', 'Users'], ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
   view.innerHTML = `
     <div class="page-head"><div>
       <h1>${statusDot(a)}${esc(a.hostname)}</h1>
       <div class="muted small" style="margin-top:4px">${osCell(a)} · ${a.client_name ? `<a href="#/clients/${a.client_id}">${esc(a.client_name)}</a>` : 'No client'} · ${a.maintenance ? badge('maintenance', 'warn') : a.online ? badge('online', 'ok') : badge(`offline · ${fmtAgo(a.last_seen)}`, 'bad')}</div></div>
       <div class="row">${can('tech') && a.platform === 'windows' ? `<a class="btn primary" href="/remote.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Remote control</a>` : ''}
-      ${can('tech') ? `<button class="btn ${a.platform === 'windows' ? '' : 'primary'}" data-action="run-on" data-ids="${a.id}">Run script</button><button class="btn" data-action="refresh-inv" data-id="${a.id}">Refresh inventory</button>` : ''}</div></div>
+      ${can('tech') && a.platform === 'linux' ? `<a class="btn primary" href="/terminal.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Terminal</a>` : ''}
+      ${can('tech') ? `<button class="btn" data-action="run-on" data-ids="${a.id}">Run script</button><button class="btn" data-action="refresh-inv" data-id="${a.id}">Refresh inventory</button>` : ''}</div></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/devices/${a.id}/${k}" class="${k === tab ? 'active' : ''}">${l}</a>`).join('')}</nav>
     <div id="tab"></div>`;
   const el = $('#tab');
-  const fn = { overview: devOverview, terminal: devTerminal, jobs: devJobs, software: devSoftware, alerts: devAlerts, settings: devSettings }[tab] || devOverview;
+  const fn = {
+    overview: devOverview, terminal: devTerminal, files: devFiles, updates: devUpdates, software: devSoftware, users: devUsers,
+    jobs: devJobs, alerts: devAlerts, settings: devSettings,
+  }[tab] || devOverview;
   await fn(el, a);
 }
 
@@ -455,16 +480,422 @@ async function devJobs(el, a) {
 
 async function devSoftware(el, a) {
   const sw = await api('GET', `/api/agents/${a.id}/software`);
-  el.innerHTML = `<div class="toolbar"><input type="search" id="sw-q" placeholder="Filter ${sw.length} packages…"><span class="muted small">Inventory updated ${fmtAgo(a.inventory_at)}</span></div>
-    <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Version</th><th>Publisher</th></tr></thead><tbody id="sw-body"></tbody></table></div></div>`;
+  const tech = can('tech');
+  el.innerHTML = `<div class="toolbar"><input type="search" id="sw-q" placeholder="Filter ${sw.length} packages…">
+      <span class="muted small">Inventory updated ${fmtAgo(a.inventory_at)}</span><span class="grow"></span>
+      ${tech ? '<button class="btn primary" id="sw-install">Install software…</button>' : ''}</div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Version</th><th>Publisher</th>${tech ? '<th></th>' : ''}</tr></thead><tbody id="sw-body"></tbody></table></div></div>`;
   const draw = () => {
     const q = $('#sw-q').value.toLowerCase();
     const rows = sw.filter((s) => !q || `${s.name} ${s.publisher}`.toLowerCase().includes(q));
-    $('#sw-body').innerHTML = rows.slice(0, 2000).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono small">${esc(s.version)}</td><td class="small muted">${esc(s.publisher)}</td></tr>`).join('')
-      || '<tr><td colspan="3" class="empty">No software inventory yet</td></tr>';
+    $('#sw-body').innerHTML = rows.slice(0, 2000).map((s) => `<tr><td>${esc(s.name)}</td><td class="mono small">${esc(s.version)}</td><td class="small muted">${esc(s.publisher)}</td>
+      ${tech ? `<td class="right nowrap"><button class="btn sm" data-sw="reinstall" data-name="${esc(s.name)}">Reinstall</button> <button class="btn sm danger" data-sw="uninstall" data-name="${esc(s.name)}">Uninstall</button></td>` : ''}</tr>`).join('')
+      || `<tr><td colspan="4" class="empty">No software inventory yet</td></tr>`;
   };
   $('#sw-q').addEventListener('input', draw);
   draw();
+  if (!tech) return;
+  $('#sw-install').addEventListener('click', () => installSoftwareModal(a));
+  $('#sw-body').addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-sw]');
+    if (!b) return;
+    const { sw: op, name } = b.dataset;
+    const msg = op === 'uninstall'
+      ? `Uninstall "${name}" from ${a.hostname}? It runs silently; some programs may still close running apps or require a reboot.`
+      : `Reinstall "${name}" on ${a.hostname}?${a.platform === 'windows' ? ' (Uses winget; works when the name matches a winget package exactly.)' : ''}`;
+    if (!await confirmDialog(msg, { okLabel: op === 'uninstall' ? 'Uninstall' : 'Reinstall', danger: op === 'uninstall' })) return;
+    const j = await deviceTask(a.id, `software.${op}`, { name }, { wait: false });
+    openJobModal(j.id);
+  }));
+}
+
+function installSoftwareModal(a) {
+  const win = a.platform === 'windows';
+  const m = openModal(`Install software on ${a.hostname}`, `
+    <p class="small muted" style="margin-top:0">${win ? 'Installs machine-wide with <strong>winget</strong> (Windows Package Manager), silently.' : 'Installs with the system package manager (apt, dnf, yum, zypper, apk or pacman).'}</p>
+    <form id="si-search" class="row" style="flex-wrap:nowrap"><input type="text" name="q" placeholder="Search, e.g. ${win ? 'chrome, 7zip, vlc' : 'htop, nginx, git'}" required><button class="btn">Search</button></form>
+    <div id="si-results" style="margin:12px 0;max-height:340px;overflow:auto"></div>
+    <label>Or install by ${win ? 'winget ID' : 'package name'}</label>
+    <form id="si-direct" class="row" style="flex-wrap:nowrap"><input type="text" name="id" placeholder="${win ? 'e.g. Google.Chrome' : 'e.g. htop'}" required><button class="btn primary">Install</button></form>`, { wide: true });
+  const install = guard(async (id) => {
+    const j = await deviceTask(a.id, 'software.install', { id }, { wait: false });
+    closeModal();
+    openJobModal(j.id);
+  });
+  $('#si-search', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const out = $('#si-results', m);
+    out.innerHTML = '<div class="muted small">Searching on the device…</div>';
+    try {
+      const j = await deviceTask(a.id, 'software.search', { query: e.target.q.value });
+      const rows = parseTsv(j.stdout, 'P');
+      out.innerHTML = rows.length
+        ? `<table><tbody>${rows.map(([id, name, ver]) => `<tr><td><strong>${esc(name || id)}</strong><div class="small muted mono">${esc(id)}</div></td><td class="small">${esc(ver)}</td>
+            <td class="right"><button class="btn sm primary" data-id="${esc(id)}">Install</button></td></tr>`).join('')}</tbody></table>`
+        : `<pre class="out">${esc(j.stdout || 'No results')}</pre>`;
+    } catch (err) { out.innerHTML = `<div class="small" style="color:var(--bad)">${esc(err.message)}</div>`; }
+  }));
+  $('#si-results', m).addEventListener('click', (e) => { const b = e.target.closest('[data-id]'); if (b) install(b.dataset.id); });
+  $('#si-direct', m).addEventListener('submit', (e) => { e.preventDefault(); install(e.target.id.value.trim()); });
+}
+
+// ---------------- device tasks: shared helpers ----------------
+const parseTsv = (s, tag) => String(s || '').split(/\r?\n/)
+  .filter((l) => (tag ? l.startsWith(`${tag}\t`) : l.trim()))
+  .map((l) => l.split('\t').slice(tag ? 1 : 0));
+
+// PowerShell error records are noisy ("C:\...\jobs\x.ps1 : message\nAt line:..."); keep the message.
+function cleanErr(s) {
+  const lines = String(s || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return '';
+  const first = lines[0].replace(/^[A-Za-z]:\\.*?\.ps1\s*:\s*/, '').replace(/^Exception calling .*?" with "\d+" argument\(s\): /, '');
+  return first.replace(/^"|"$/g, '');
+}
+
+async function deviceTask(agentId, task, args = {}, { wait = true } = {}) {
+  const j = await api('POST', `/api/agents/${agentId}/task`, { task, args, wait });
+  if (!wait) return j;
+  if (['queued', 'running'].includes(j.status)) throw new Error('The device is taking a while. The result will appear in Script history.');
+  if (j.status !== 'success') throw new Error(cleanErr(j.stderr) || cleanErr(j.stdout) || `Task ${j.status}`);
+  return j;
+}
+
+async function pollJob(id, onTick) {
+  for (;;) {
+    const j = await api('GET', `/api/jobs/${id}`);
+    if (onTick) onTick(j);
+    if (!['queued', 'running'].includes(j.status)) return j;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+// ---------------- files ----------------
+const isWin = (a) => a.platform === 'windows';
+function fsJoin(a, dir, name) {
+  if (isWin(a)) return dir ? `${dir.replace(/\\+$/, '')}\\${name}` : name;
+  return dir === '/' ? `/${name}` : `${dir.replace(/\/+$/, '')}/${name}`;
+}
+function fsParent(a, p) {
+  if (isWin(a)) {
+    if (!p || /^[A-Za-z]:\\?$/.test(p)) return '';
+    const t = p.replace(/\\+$/, '');
+    const par = t.slice(0, t.lastIndexOf('\\'));
+    return /^[A-Za-z]:$/.test(par) ? `${par}\\` : par;
+  }
+  const t = p.replace(/\/+$/, '');
+  const i = t.lastIndexOf('/');
+  return i <= 0 ? '/' : t.slice(0, i);
+}
+function fsCrumbs(a, p) {
+  if (isWin(a)) {
+    const out = [['This PC', '']];
+    const parts = p.split('\\').filter(Boolean);
+    parts.forEach((part, i) => out.push([part, i === 0 ? `${part}\\` : parts.slice(0, i + 1).join('\\')]));
+    return out;
+  }
+  const out = [['/', '/']];
+  const parts = p.split('/').filter(Boolean);
+  parts.forEach((part, i) => out.push([part, `/${parts.slice(0, i + 1).join('/')}`]));
+  return out;
+}
+
+function xhrUpload(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', url);
+    x.setRequestHeader('X-HostPilot', '1');
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(Math.round((e.loaded * 100) / e.total)); };
+    x.onload = () => {
+      let d = {};
+      try { d = JSON.parse(x.responseText); } catch { /* not json */ }
+      if (x.status < 300) resolve(d); else reject(new Error(d.error || x.statusText));
+    };
+    x.onerror = () => reject(new Error('Upload failed'));
+    x.send(file);
+  });
+}
+
+async function devFiles(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">File access requires the tech role.</div>'; return; }
+  if (!state.files) state.files = new Map();
+  const st = state.files.get(a.id) || { path: isWin(a) ? '' : '/' };
+  state.files.set(a.id, st);
+  el.innerHTML = `<div class="toolbar">
+      <button class="btn sm" data-f="up" title="Parent folder">↑</button><div class="crumbs" id="f-crumbs"></div><span class="grow"></span>
+      <input type="search" id="f-q" placeholder="Filter…" style="max-width:160px">
+      <button class="btn sm" data-f="refresh">Refresh</button><button class="btn sm" data-f="mkdir">New folder</button>
+      <label class="btn sm primary" style="margin:0;color:#fff">Upload<input type="file" id="f-up" multiple hidden></label></div>
+    <div class="small muted" id="f-status" style="min-height:18px;margin-bottom:6px"></div>
+    <div class="card flush dropzone" id="f-zone"><div class="table-wrap"><table>
+      <thead><tr><th>Name</th><th class="right">Size</th><th>Modified</th><th></th></tr></thead><tbody id="f-body"></tbody></table></div></div>
+    <p class="small muted">Drag files onto the list to upload into the current folder. Folders download as ${isWin(a) ? '.zip' : '.tar.gz'}. Runs as ${isWin(a) ? 'SYSTEM' : 'root'}.</p>`;
+  let entries = [];
+  const status = (t) => { const s = $('#f-status'); if (s) s.textContent = t; };
+  const draw = () => {
+    const q = ($('#f-q')?.value || '').toLowerCase();
+    const root = isWin(a) && !st.path;
+    $('#f-body').innerHTML = entries.filter((e) => !q || e.name.toLowerCase().includes(q)).map((e) => `<tr data-name="${esc(e.name)}" data-dir="${e.dir ? 1 : 0}">
+        <td><span class="fname"><span class="ic">${e.dir ? (root ? '💽' : '📁') : '📄'}</span>${e.dir ? `<a href="#" data-fa="open">${esc(e.name)}</a>` : esc(e.name)}</span></td>
+        <td class="right small nowrap">${e.dir && !root ? '' : fmtBytes(e.size)}</td>
+        <td class="small nowrap">${e.mtime ? new Date(e.mtime).toLocaleString() : ''}</td>
+        <td class="right nowrap">${root ? '' : `<button class="btn sm" data-fa="download">Download</button> <button class="btn sm" data-fa="rename">Rename</button> <button class="btn sm danger" data-fa="delete">Delete</button>`}</td></tr>`).join('')
+      || '<tr><td colspan="4" class="empty">Empty folder</td></tr>';
+  };
+  const load = async () => {
+    $('#f-crumbs').innerHTML = fsCrumbs(a, st.path).map(([l, p]) => `<a href="#" data-crumb="${esc(p)}">${esc(l)}</a>`).join('<span class="muted">›</span>');
+    status('Loading…');
+    $('#f-body').innerHTML = '<tr><td colspan="4" class="empty">Loading…</td></tr>';
+    try {
+      const j = await deviceTask(a.id, 'files.list', { path: st.path });
+      entries = parseTsv(j.stdout).map(([t, size, mt, ...rest]) => ({ dir: t === 'd', size: Number(size) || 0, mtime: Number(mt) * 1000, name: rest.join('\t') }))
+        .filter((e) => e.name)
+        .sort((x, y) => (y.dir - x.dir) || x.name.localeCompare(y.name, undefined, { numeric: true, sensitivity: 'base' }));
+      status(`${entries.length} item${entries.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      entries = [];
+      status(err.message);
+    }
+    draw();
+  };
+  const go = (p) => { st.path = p; $('#f-q').value = ''; load(); };
+
+  const download = async (e) => {
+    const p = fsJoin(a, st.path, e.name);
+    status(`Preparing ${e.name}…`);
+    const r = await api('POST', `/api/agents/${a.id}/files/download`, { path: p, is_dir: e.dir });
+    const j = await pollJob(r.job.id, (jj) => status(`${e.name}: ${jj.status === 'queued' ? 'waiting for the device' : 'the device is sending the file'}…`));
+    if (j.status !== 'success') throw new Error(cleanErr(j.stderr) || 'Download failed');
+    const link = document.createElement('a');
+    link.href = `/api/transfers/${r.transfer_id}`;
+    link.download = '';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    status(`Downloaded ${e.name}`);
+  };
+
+  const upload = async (files) => {
+    if (isWin(a) && !st.path) { toast('Open a drive or folder first', 'error'); return; }
+    for (const f of files) {
+      if (entries.some((x) => x.name.toLowerCase() === f.name.toLowerCase())
+        && !await confirmDialog(`${f.name} already exists here. Overwrite it?`, { okLabel: 'Overwrite', danger: true })) continue;
+      const dest = fsJoin(a, st.path, f.name);
+      const r = await xhrUpload(`/api/agents/${a.id}/files/upload?path=${encodeURIComponent(dest)}`, f, (pct) => status(`Uploading ${f.name}… ${pct}%`));
+      const j = await pollJob(r.job.id, () => status(`Sending ${f.name} to the device…`));
+      if (j.status === 'success') toast(`Uploaded ${f.name}`); else toast(`${f.name}: ${cleanErr(j.stderr) || 'upload failed'}`, 'error');
+    }
+    await load();
+  };
+
+  el.addEventListener('click', guard(async (ev) => {
+    const crumb = ev.target.closest('[data-crumb]');
+    if (crumb) { ev.preventDefault(); go(crumb.dataset.crumb); return; }
+    const fb = ev.target.closest('[data-f]');
+    if (fb) {
+      const op = fb.dataset.f;
+      if (op === 'up') go(fsParent(a, st.path));
+      if (op === 'refresh') load();
+      if (op === 'mkdir') {
+        if (isWin(a) && !st.path) { toast('Open a drive first', 'error'); return; }
+        const name = await promptDialog('New folder', 'Folder name');
+        if (!name) return;
+        await deviceTask(a.id, 'files.mkdir', { path: fsJoin(a, st.path, name) });
+        load();
+      }
+      return;
+    }
+    const act = ev.target.closest('[data-fa]');
+    if (!act) return;
+    ev.preventDefault();
+    const row = act.closest('tr');
+    const e = entries.find((x) => x.name === row.dataset.name);
+    if (!e) return;
+    const p = fsJoin(a, st.path, e.name);
+    switch (act.dataset.fa) {
+      case 'open': go(isWin(a) && !st.path ? e.name : p); break;
+      case 'download': await download(e); break;
+      case 'rename': {
+        const to = await promptDialog(`Rename ${e.name}`, 'New name', e.name);
+        if (!to || to === e.name) return;
+        await deviceTask(a.id, 'files.rename', { path: p, to });
+        load();
+        break;
+      }
+      case 'delete':
+        if (!await confirmDialog(`Delete ${e.dir ? 'the folder' : ''} ${p}${e.dir ? ' and everything in it' : ''}? This cannot be undone.`, { okLabel: 'Delete', danger: true })) return;
+        status(`Deleting ${e.name}…`);
+        await deviceTask(a.id, 'files.delete', { path: p });
+        toast(`Deleted ${e.name}`);
+        load();
+        break;
+      default:
+    }
+  }));
+  $('#f-q').addEventListener('input', draw);
+  $('#f-up').addEventListener('change', guard(async (ev) => { const files = [...ev.target.files]; ev.target.value = ''; await upload(files); }));
+  const zone = $('#f-zone');
+  zone.addEventListener('dragover', (ev) => { ev.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', guard(async (ev) => { ev.preventDefault(); zone.classList.remove('drag'); await upload([...ev.dataTransfer.files]); }));
+  await load();
+}
+
+function promptDialog(title, label, value = '') {
+  return new Promise((resolve) => {
+    const m = openModal(title, `<form id="pd-form"><div class="field"><label>${esc(label)}</label><input type="text" name="v" value="${esc(value)}" required></div></form>`,
+      { foot: '<button class="btn" data-k="no">Cancel</button><button class="btn primary" form="pd-form">OK</button>' });
+    const input = $('input', m);
+    input.focus();
+    input.select();
+    $('#pd-form', m).addEventListener('submit', (e) => { e.preventDefault(); const v = input.value.trim(); closeModal(); resolve(v); });
+    m.addEventListener('click', (e) => { if (e.target.closest('[data-k="no"]')) { closeModal(); resolve(null); } });
+  });
+}
+
+// ---------------- OS updates ----------------
+async function devUpdates(el, a) {
+  const sel = new Set();
+  let reboot = false;
+  let busy = false;
+  const draw = async () => {
+    const d = await api('GET', `/api/agents/${a.id}/updates`);
+    busy = !!d.running;
+    const sec = (u) => /critical|important|security/i.test(`${u.severity} ${u.category}`);
+    const ids = new Set(d.updates.map((u) => u.uid));
+    for (const id of [...sel]) if (!ids.has(id)) sel.delete(id);
+    el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="row" style="justify-content:space-between">
+        <div><strong>${d.checked_at ? `${d.updates.length} pending update${d.updates.length === 1 ? '' : 's'}` : 'Not scanned yet'}</strong>
+          ${d.updates.filter(sec).length ? badge(`${d.updates.filter(sec).length} security`, 'bad') : ''} ${d.reboot_required ? badge('reboot required', 'warn') : ''}
+          <div class="small muted">${d.checked_at ? `Last scanned ${fmtAgo(d.checked_at)}` : ''}${busy ? ` · ${d.running.task === 'updates.install' ? 'Installing updates' : 'Scanning'} (${d.running.status})…` : ''}
+          · ${a.platform === 'windows' ? 'Windows Update' : 'system package manager'}</div></div>
+        ${can('tech') ? `<div class="row"><label class="check small" style="margin:0"><input type="checkbox" id="u-reboot" ${reboot ? 'checked' : ''}> Reboot if required</label>
+          <button class="btn" data-u="scan" ${busy ? 'disabled' : ''}>Scan now</button>
+          <button class="btn" data-u="selected" ${busy || !sel.size ? 'disabled' : ''}>Install selected (${sel.size})</button>
+          <button class="btn primary" data-u="all" ${busy || !d.updates.length ? 'disabled' : ''}>Install all</button></div>` : ''}
+      </div></div>
+      <div class="card flush"><div class="table-wrap"><table>
+        <thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="u-all"></th>' : ''}<th>Update</th><th>Severity</th><th>Category / repo</th></tr></thead>
+        <tbody>${d.updates.map((u) => `<tr>${can('tech') ? `<td><input type="checkbox" data-uid="${esc(u.uid)}" ${sel.has(u.uid) ? 'checked' : ''}></td>` : ''}
+          <td>${esc(u.title)}${u.kb ? ` <span class="small muted mono">${esc(u.kb)}</span>` : ''}</td>
+          <td>${u.severity ? badge(u.severity, sec(u) ? 'bad' : 'info') : (sec(u) ? badge('security', 'bad') : '')}</td><td class="small">${esc(u.category)}</td></tr>`).join('')
+          || `<tr><td colspan="4" class="empty">${d.checked_at ? 'Up to date 🎉' : 'Click "Scan now" to check for updates.'}</td></tr>`}</tbody></table></div></div>`;
+  };
+  el.addEventListener('change', (e) => {
+    if (e.target.id === 'u-reboot') reboot = e.target.checked;
+    if (e.target.dataset.uid) { e.target.checked ? sel.add(e.target.dataset.uid) : sel.delete(e.target.dataset.uid); draw(); }
+    if (e.target.id === 'u-all') { $$('[data-uid]', el).forEach((cb) => { e.target.checked ? sel.add(cb.dataset.uid) : sel.delete(cb.dataset.uid); }); draw(); }
+  });
+  el.addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-u]');
+    if (!b) return;
+    const op = b.dataset.u;
+    if (op === 'scan') await deviceTask(a.id, 'updates.scan', {}, { wait: false });
+    else {
+      const n = op === 'all' ? 'all pending updates' : `${sel.size} selected update(s)`;
+      if (!await confirmDialog(`Install ${n} on ${a.hostname}${reboot ? ' and reboot automatically if required' : ''}?`, { okLabel: 'Install' })) return;
+      await deviceTask(a.id, 'updates.install', { ids: op === 'all' ? 'all' : [...sel], reboot }, { wait: false });
+      sel.clear();
+    }
+    toast(op === 'scan' ? 'Scan started' : 'Installation started. Progress is in Script history.');
+    await draw();
+  }));
+  await draw();
+  every(5000, async () => { if (busy) await draw(); });
+}
+
+// ---------------- local users ----------------
+async function devUsers(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">Managing users requires the tech role.</div>'; return; }
+  el.innerHTML = `<div class="toolbar"><span class="muted small" id="us-status">Loading…</span><span class="grow"></span>
+      <button class="btn sm" id="us-refresh">Refresh</button><button class="btn primary" id="us-new">New user</button></div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr><th>User</th><th>Full name</th><th>Status</th><th>Admin</th><th>${isWin(a) ? 'Last logon' : 'Home / shell'}</th><th></th></tr></thead>
+    <tbody id="us-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody></table></div></div>
+    <p class="small muted">Local accounts only${isWin(a) ? ' (domain accounts are managed in Active Directory)' : ''}. Passwords are masked in job history.</p>`;
+  let users = [];
+  const load = async () => {
+    $('#us-status').textContent = 'Loading…';
+    try {
+      const j = await deviceTask(a.id, 'users.list');
+      users = parseTsv(j.stdout, 'U').map(([name, enabled, admin, fullname, last, extra]) => ({ name, enabled: enabled === '1', admin: admin === '1', fullname, last: Number(last) * 1000, extra }));
+      $('#us-status').textContent = `${users.length} account${users.length === 1 ? '' : 's'}`;
+    } catch (err) { $('#us-status').textContent = err.message; }
+    $('#us-body').innerHTML = users.map((u) => `<tr data-user="${esc(u.name)}"><td><strong>${esc(u.name)}</strong></td><td>${esc(u.fullname)}</td>
+      <td>${u.enabled ? badge('enabled', 'ok') : badge('disabled')}</td><td>${u.admin ? badge('admin', 'warn') : ''}</td>
+      <td class="small">${isWin(a) ? (u.last ? fmtAgo(u.last) : 'never') : esc(u.extra)}</td>
+      <td class="right nowrap"><button class="btn sm" data-ua="password">Reset password</button>
+        <button class="btn sm" data-ua="${u.enabled ? 'disable' : 'enable'}">${u.enabled ? 'Disable' : 'Enable'}</button>
+        <button class="btn sm" data-ua="${u.admin ? 'unadmin' : 'admin'}">${u.admin ? 'Remove admin' : 'Make admin'}</button>
+        <button class="btn sm danger" data-ua="delete">Delete</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">No users</td></tr>';
+  };
+  const runUpdate = async (args, done) => {
+    const j = await deviceTask(a.id, 'users.update', args);
+    toast(done || (j.stdout || 'Done').trim().split('\n').pop());
+    await load();
+  };
+  $('#us-refresh').addEventListener('click', guard(load));
+  $('#us-new').addEventListener('click', () => userFormModal(a, null, guard(async (vals) => {
+    const j = await deviceTask(a.id, 'users.create', vals);
+    toast((j.stdout || 'User created').trim().split('\n').pop());
+    closeModal();
+    await load();
+  })));
+  $('#us-body').addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-ua]');
+    if (!b) return;
+    const name = b.closest('tr').dataset.user;
+    switch (b.dataset.ua) {
+      case 'password':
+        userFormModal(a, name, guard(async (vals) => { await runUpdate({ name, password: vals.password, must_change: vals.must_change }, `Password changed for ${name}`); closeModal(); }));
+        break;
+      case 'enable': await runUpdate({ name, enabled: true }); break;
+      case 'disable':
+        if (await confirmDialog(`Disable ${name}? They won't be able to sign in.`, { okLabel: 'Disable', danger: true })) await runUpdate({ name, enabled: false });
+        break;
+      case 'admin':
+        if (await confirmDialog(`Give ${name} administrator rights on ${a.hostname}?`, { okLabel: 'Make admin' })) await runUpdate({ name, admin: true });
+        break;
+      case 'unadmin': await runUpdate({ name, admin: false }); break;
+      case 'delete': {
+        const m = openModal(`Delete ${name}`, `<p>Delete the local account <strong>${esc(name)}</strong> on ${esc(a.hostname)}?</p>
+          <label class="check"><input type="checkbox" id="ud-home"> Also delete ${isWin(a) ? 'their profile folder' : 'their home folder'} (cannot be undone)</label>`,
+        { foot: '<button class="btn" data-k="no">Cancel</button><button class="btn danger solid" data-k="yes">Delete</button>' });
+        m.addEventListener('click', guard(async (ev) => {
+          const k = ev.target.closest('[data-k]')?.dataset.k;
+          if (!k) return;
+          const home = $('#ud-home', m).checked;
+          closeModal();
+          if (k === 'yes') { const j = await deviceTask(a.id, 'users.delete', { name, remove_home: home }); toast((j.stdout || 'Deleted').trim().split('\n')[0]); await load(); }
+        }));
+        break;
+      }
+      default:
+    }
+  }));
+  await load();
+}
+
+function userFormModal(a, existing, onSubmit) {
+  const m = openModal(existing ? `Reset password for ${existing}` : `New local user on ${a.hostname}`, `<form id="uf-form">
+    ${existing ? '' : `<div class="form-grid"><div class="field"><label>Username</label><input type="text" name="name" required maxlength="${isWin(a) ? 20 : 32}" autocomplete="off"></div>
+      <div class="field"><label>Full name (optional)</label><input type="text" name="fullname" maxlength="100"></div></div>`}
+    <div class="form-grid"><div class="field"><label>Password (min 8 chars)</label><input type="password" name="password" minlength="8" required autocomplete="new-password"></div>
+      <div class="field"><label>Confirm password</label><input type="password" name="confirm" minlength="8" required autocomplete="new-password"></div></div>
+    ${existing ? '' : '<label class="check"><input type="checkbox" name="admin"> Administrator</label>'}
+    <label class="check"><input type="checkbox" name="must_change"> Must change password at next sign-in</label>
+    <div class="error-text" id="uf-err" style="margin-top:8px"></div></form>`,
+  { foot: `<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="uf-form">${existing ? 'Reset password' : 'Create user'}</button>` });
+  $('#uf-form', m).addEventListener('submit', (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    if (f.password.value !== f.confirm.value) { $('#uf-err', m).textContent = 'Passwords do not match'; return; }
+    onSubmit({
+      name: f.namedItem('name') ? f.namedItem('name').value.trim() : undefined,
+      fullname: f.namedItem('fullname') ? f.namedItem('fullname').value : '',
+      password: f.password.value, admin: f.namedItem('admin') ? f.namedItem('admin').checked : undefined,
+      must_change: f.must_change.checked,
+    });
+  });
 }
 
 function alertsTable(alerts, { showHost = true } = {}) {
@@ -597,6 +1028,8 @@ function newClientModal() {
   }));
 }
 
+const dlUrl = (server, token, file) => `${server}/download/${token}/${file}`;
+
 function installCommands(server, token) {
   return {
     windows: `irm '${server}/install/windows?token=${token}' | iex`,
@@ -616,7 +1049,19 @@ async function pageClient(view, id) {
     ${c.notes ? `<div class="card" style="margin-bottom:16px;white-space:pre-wrap">${esc(c.notes)}</div>` : ''}
     ${can('tech') ? `<div class="card" style="margin-bottom:16px"><h2>Install the agent</h2>
       ${cmds ? `
-        <p class="small muted">Run on each host. Devices enroll into <strong>${esc(c.name)}</strong>. Token ${latest.expires_at ? `expires ${fmtDate(latest.expires_at)}` : 'never expires'}.</p>
+        <p class="small muted">Devices enroll into <strong>${esc(c.name)}</strong>. Token ${latest.expires_at ? `expires ${fmtDate(latest.expires_at)}` : 'never expires'}.</p>
+        <h3>Download an installer</h3>
+        <div class="row field">
+          <a class="btn primary" href="${esc(dlUrl(c.server_url, latest.token, 'HostPilot-Setup.exe'))}">⬇ Windows installer (.exe)</a>
+          <button class="btn sm" data-action="copy" data-text="${esc(dlUrl(c.server_url, latest.token, 'HostPilot-Setup.exe'))}">Copy link</button>
+          <span style="width:12px"></span>
+          <a class="btn" href="${esc(dlUrl(c.server_url, latest.token, 'hostpilot-install.sh'))}">⬇ Linux installer (.sh)</a>
+          <button class="btn sm" data-action="copy" data-text="${esc(dlUrl(c.server_url, latest.token, 'hostpilot-install.sh'))}">Copy link</button>
+        </div>
+        <p class="small muted">Email the link to the client. Windows: double-click the .exe and approve the admin prompt. It isn't code-signed, so SmartScreen may warn
+          ("More info → Run anyway"); <code>HostPilot-Setup.exe /quiet</code> installs silently (e.g. via GPO/Intune). Linux: <code>sudo bash hostpilot-install.sh</code>.
+          Links stop working when the token expires or is revoked.</p>
+        <h3>Or use a one-line command</h3>
         <label>Windows: elevated PowerShell (Windows 10 / Server 2016 or newer)</label>
         <div class="copybox field"><code>${esc(cmds.windows)}</code><button class="btn" data-action="copy" data-text="${esc(cmds.windows)}">Copy</button></div>
         <label>Linux: any systemd distro, as root</label>
@@ -845,7 +1290,7 @@ async function pageSettings(view) {
   view.innerHTML = `<div class="page-head"><h1>Settings</h1></div><div class="grid cols-2">
     ${admin ? `<form class="card" id="set-form"><h2>Monitoring & alerting</h2>
       <div class="form-grid">${num('cpu_threshold', 'CPU alert %', '3-check average; 0 disables')}${num('mem_threshold', 'Memory alert %')}${num('disk_threshold', 'Disk alert %')}${num('offline_minutes', 'Offline alert after (min)')}</div>
-      <div class="form-grid">${num('checkin_seconds', 'Agent check-in (sec)')}${num('inventory_hours', 'Inventory refresh (hours)')}${num('metric_retention_days', 'Keep metrics (days)')}${num('job_retention_days', 'Keep job output (days)')}</div>
+      <div class="form-grid">${num('checkin_seconds', 'Agent check-in (sec)')}${num('inventory_hours', 'Inventory refresh (hours)')}${num('update_scan_hours', 'OS update scan (hours)', '0 disables automatic scans')}${num('metric_retention_days', 'Keep metrics (days)')}${num('job_retention_days', 'Keep job output (days)')}</div>
       <div class="field"><label>Alert webhook URL</label><input name="webhook_url" type="url" value="${esc(s.webhook_url)}" placeholder="https://hooks.slack.com/… or Discord / Teams / ntfy webhook"></div>
       <div class="row"><button class="btn primary">Save settings</button><button type="button" class="btn" data-action="test-webhook">Send test</button></div>
       <p class="small muted">Current agent versions: Windows <span class="mono">${cfg.agent_versions.windows}</span>, Linux <span class="mono">${cfg.agent_versions.linux}</span>. Agents self-update when these change.</p></form>` : ''}
@@ -887,6 +1332,91 @@ async function pageSettings(view) {
     try { await api('PUT', `/api/users/${sel.dataset.roleUser}`, { role: sel.value }); toast('Role updated'); }
     catch (err) { router(); throw err; }
   })));
+}
+
+// ---------------- patching (fleet) ----------------
+async function pagePatching(view) {
+  const sel = new Set();
+  let filter = state.patchFilter || '';
+  let reboot = false;
+  let rows = [];
+  view.innerHTML = `<div id="p-root"><div class="page-head"><h1>Patching</h1>
+      ${can('tech') ? `<div class="row"><label class="check small" style="margin:0"><input type="checkbox" id="p-reboot"> Reboot if required</label>
+        <button class="btn" data-p="scan" disabled>Scan selected</button><button class="btn primary" data-p="install" disabled>Install all updates on selected</button></div>` : ''}</div>
+    <div class="toolbar"><select id="p-filter"><option value="">All devices</option><option value="pending">Updates pending</option>
+      <option value="security">Security updates pending</option><option value="reboot">Reboot required</option><option value="stale">Not scanned in 3+ days</option></select>
+      <span class="small muted" id="p-count"></span></div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="p-all"></th>' : ''}
+      <th>Device</th><th>Client</th><th>OS</th><th class="right">Pending</th><th class="right">Security</th><th>Reboot</th><th>Last scan</th><th>Status</th></tr></thead>
+      <tbody id="p-body"></tbody></table></div></div>
+    <p class="small muted">Devices are scanned automatically (interval under Settings). Windows uses Windows Update; Linux uses apt / dnf / yum / zypper.</p></div>`;
+  const root = $('#p-root');
+  $('#p-filter').value = filter;
+  const visible = () => rows.filter((r) => {
+    if (filter === 'pending') return r.pending_updates > 0;
+    if (filter === 'security') return r.security_updates > 0;
+    if (filter === 'reboot') return r.reboot_required;
+    if (filter === 'stale') return !r.updates_checked_at || Date.now() - r.updates_checked_at > 3 * 86400000;
+    return true;
+  });
+  const draw = () => {
+    const vis = visible();
+    $('#p-count').textContent = `${vis.length} of ${rows.length}`;
+    $('#p-body').innerHTML = vis.map((r) => `<tr>${can('tech') ? `<td><input type="checkbox" data-pid="${r.id}" ${sel.has(r.id) ? 'checked' : ''}></td>` : ''}
+      <td class="nowrap">${statusDot(r)}<a href="#/devices/${r.id}/updates">${esc(r.hostname)}</a></td><td class="small">${esc(r.client_name || '—')}</td><td>${osCell(r)}</td>
+      <td class="right">${r.updates_checked_at ? (r.pending_updates || 0) : '—'}</td>
+      <td class="right">${r.security_updates ? badge(r.security_updates, 'bad') : (r.updates_checked_at ? '0' : '—')}</td>
+      <td>${r.reboot_required ? badge('required', 'warn') : ''}</td>
+      <td class="small nowrap">${r.updates_checked_at ? fmtAgo(r.updates_checked_at) : 'never'}</td>
+      <td>${r.busy ? badge(r.busy === 'updates.install' ? 'installing' : 'scanning', 'running') : ''}</td></tr>`).join('')
+      || '<tr><td colspan="9" class="empty">No devices match</td></tr>';
+    for (const b of $$('[data-p]')) b.disabled = !sel.size;
+    const all = $('#p-all');
+    if (all) all.checked = vis.length > 0 && vis.every((r) => sel.has(r.id));
+  };
+  const load = async () => { rows = await api('GET', '/api/patching'); draw(); };
+  $('#p-filter').addEventListener('change', (e) => { filter = state.patchFilter = e.target.value; draw(); });
+  root.addEventListener('change', (e) => {
+    if (e.target.id === 'p-reboot') reboot = e.target.checked;
+    if (e.target.dataset.pid) { e.target.checked ? sel.add(e.target.dataset.pid) : sel.delete(e.target.dataset.pid); draw(); }
+    if (e.target.id === 'p-all') { for (const r of visible()) e.target.checked ? sel.add(r.id) : sel.delete(r.id); draw(); }
+  });
+  root.addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-p]');
+    if (!b) return;
+    const install = b.dataset.p === 'install';
+    if (install && !await confirmDialog(`Install all pending updates on ${sel.size} device(s)${reboot ? ', rebooting where required' : ''}?`, { okLabel: 'Install' })) return;
+    const r = await api('POST', '/api/tasks', { agent_ids: [...sel], task: install ? 'updates.install' : 'updates.scan', args: install ? { ids: 'all', reboot } : {} });
+    toast(`${install ? 'Installing' : 'Scanning'} on ${r.created} device(s)`);
+    sel.clear();
+    await load();
+  }));
+  await load();
+  every(10000, load);
+}
+
+async function bulkSoftwareModal(ids) {
+  const agents = (await api('GET', '/api/agents')).filter((a) => ids.includes(a.id));
+  const hasWin = agents.some((a) => a.platform === 'windows');
+  const hasLin = agents.some((a) => a.platform === 'linux');
+  const m = openModal(`Install software on ${agents.length} device(s)`, `<form id="bs-form">
+    ${hasWin ? '<div class="field"><label>Windows: winget ID</label><input type="text" name="win" placeholder="e.g. Google.Chrome, 7zip.7zip, VideoLAN.VLC"><div class="small muted">Find IDs with "Install software…" on a device, or at winget.run</div></div>' : ''}
+    ${hasLin ? '<div class="field"><label>Linux: package name</label><input type="text" name="lin" placeholder="e.g. htop"></div>' : ''}</form>`,
+  { foot: '<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="bs-form">Install</button>' });
+  $('#bs-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const f = e.target.elements;
+    const jobs = [];
+    const win = f.namedItem('win')?.value.trim();
+    const lin = f.namedItem('lin')?.value.trim();
+    if (win) jobs.push(api('POST', '/api/tasks', { agent_ids: agents.filter((a) => a.platform === 'windows').map((a) => a.id), task: 'software.install', args: { id: win } }));
+    if (lin) jobs.push(api('POST', '/api/tasks', { agent_ids: agents.filter((a) => a.platform === 'linux').map((a) => a.id), task: 'software.install', args: { id: lin } }));
+    if (!jobs.length) { toast('Enter a package', 'error'); return; }
+    const res = await Promise.all(jobs);
+    closeModal();
+    toast(`Installing on ${res.reduce((n, r) => n + r.created, 0)} device(s)`);
+    location.hash = `#/jobs/batch/${res[0].batch_id}`;
+  }));
 }
 
 // ---------------- global click actions ----------------

@@ -15,6 +15,12 @@ A self-hosted remote monitoring & management (RMM) platform for MSPs and IT team
 - **Device inventory**: OS/build, hardware, serial, CPU, RAM, disks, IPs (local and public), logged-in user, uptime, and installed software (registry / dpkg / rpm / apk / pacman).
 - **Live monitoring**: CPU, memory, and disk utilisation, with 1h/24h/7d charts and online/offline status.
 - **Remote control (Windows)**: view and control the screen in a browser tab, with no app to install on either side. It follows UAC prompts and the login screen, sends only changed regions, and has quality presets, special-key combos (Win, Alt+Tab, Ctrl+Shift+Esc…) and "type text" for pasting passwords.
+- **Linux terminal**: a full interactive root shell in the browser (xterm.js), so `top`, `vim`, `htop` and tab completion work. It needs only bash, curl, and util-linux `script` on the server.
+- **File browser**: browse drives and folders, then upload (drag & drop), download (folders come as .zip / .tar.gz), rename, delete, or create folders.
+- **OS patching**: scan for updates with Windows Update or apt/dnf/yum/zypper, then install all or selected updates with optional automatic reboot. The fleet **Patching** page shows pending, security, and reboot-required counts. Devices are scanned automatically every 24 h.
+- **Software management**: uninstall or reinstall installed programs, and install new software with **winget** (Windows) or the package manager (Linux), on one device or in bulk.
+- **Local user management**: create, delete, enable/disable, reset passwords, and grant or remove admin on device accounts. Passwords are masked in job history.
+- **Installer downloads**: a pre-configured **HostPilot-Setup.exe** (double-click, approve UAC, done; `/quiet` for GPO/Intune) and a `.sh` for Linux. There's a shareable link per client to email to customers.
 - **Remote command console**: run PowerShell, cmd, bash, sh, or python on a device and see the output within a few seconds.
 - **Script library**: 19 starter scripts (patching, cleanup, Defender, event logs, failed units, Docker, and more). You can edit them or add your own.
 - **Bulk jobs**: run a script on many devices at once and track per-device results. Offline devices get queued jobs when they reconnect.
@@ -102,6 +108,20 @@ Limitations:
 
 If you use your own reverse proxy, make sure it forwards WebSocket upgrades for `/ws/remote`. Caddy does this automatically.
 
+### Device tasks (files, updates, software, users)
+
+These features are server-side PowerShell/bash templates in `server/task-scripts/`. They're filled with arguments (base64-encoded, so filenames and passwords can't break out of the script) and run through the normal job queue. Edit a template and redeploy to change behaviour; no agent update is needed. Every action is recorded in the audit log, and the executed script is visible in Script history with secrets masked.
+
+File transfers go through the server. The device PUTs a file to a one-time URL and the browser downloads it, or the other way round. Files are staged in `/data/transfers` for at most 2 hours, with a 4 GB limit per file.
+
+### Linux terminal
+
+The agent runs `script -qfc "bash -l"` to get a real pseudo-terminal. Keystrokes arrive over one long-lived HTTPS GET, and output is sent back in small POST batches. This works through proxies that buffer request bodies, such as Nginx Proxy Manager. Your reverse proxy must **not buffer responses**: the server sends `X-Accel-Buffering: no`, which nginx respects, and Caddy streams by default.
+
+### Windows Setup.exe
+
+`server/agents/HostPilotSetup.exe` is a small, generic .NET Framework 4 program built from `setup/HostPilotSetup.cs`. When someone downloads it, the server appends that client's server URL and enrollment token to the file, so the same binary serves every client. Rebuild it on any Windows machine with `powershell -File setup\build.ps1`; it uses the C# compiler that ships with Windows. It isn't code-signed, so Windows SmartScreen shows "Windows protected your PC" the first time. To remove the warning, sign it with your own code-signing certificate (`signtool sign`). Appending data to a signed exe can break signature validation on strictly configured machines (for example with `EnableCertPaddingCheck`). If you sign, test it, or sign each downloaded per-client exe instead of the stub.
+
 ### Files on the endpoints
 
 | | Windows | Linux |
@@ -147,4 +167,4 @@ ADMIN_PASSWORD='change-me-please' npm start
 
 ## Not included (yet)
 
-Remote desktop for Linux desktops, file transfer, and PSA/ticketing or billing aren't included. Alerts can feed your helpdesk through the webhook.
+Remote desktop for Linux *desktops* (X11/Wayland), major OS version upgrades (e.g. Windows 10 → 11, Ubuntu release upgrades), and PSA/ticketing or billing aren't included. Alerts can feed your helpdesk through the webhook.

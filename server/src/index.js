@@ -9,12 +9,13 @@ import './agent-routes.js';
 import { sessionUser, ensureAdmin } from './api-routes.js';
 import { startBackgroundTasks } from './tasks.js';
 import { handleUpgrade } from './remote.js';
+import { handleTerminalUpgrade } from './terminal.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const PORT = Number(process.env.PORT || 8080);
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.mjs': 'text/javascript; charset=utf-8',
 };
 
 const SECURITY_HEADERS = {
@@ -52,12 +53,15 @@ const server = http.createServer(async (req, res) => {
     }
     const ctx = {
       req, res, params: m.params, query: url.searchParams,
-      body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readBody(req) : {},
+      body: !m.opts.raw && ['POST', 'PUT', 'PATCH'].includes(req.method) ? await readBody(req) : {},
       user: pathname.startsWith('/api/') && !pathname.startsWith('/api/agent/') ? sessionUser(req) : null,
     };
-    // Basic CSRF defence for cookie-authenticated mutations: require same-origin JSON requests.
-    if (ctx.user && req.method !== 'GET' && !String(req.headers['content-type'] || '').includes('application/json')) {
-      throw new HttpError(415, 'Expected application/json');
+    // CSRF defence for cookie-authenticated mutations: JSON bodies, or a custom header on raw uploads
+    // (neither can be sent cross-site without a CORS preflight, which we never grant).
+    if (ctx.user && req.method !== 'GET') {
+      if (m.opts.raw ? req.headers['x-hostpilot'] !== '1' : !String(req.headers['content-type'] || '').includes('application/json')) {
+        throw new HttpError(415, 'Expected application/json');
+      }
     }
     const result = await m.handler(ctx);
     if (res.headersSent || res.destroyed) return;
@@ -72,12 +76,17 @@ const server = http.createServer(async (req, res) => {
 
 server.on('upgrade', (req, socket) => {
   socket.on('error', () => {});
-  try { handleUpgrade(req, socket, sessionUser); }
+  try {
+    if (req.url.startsWith('/ws/terminal')) handleTerminalUpgrade(req, socket, sessionUser);
+    else handleUpgrade(req, socket, sessionUser);
+  }
   catch (e) { console.error('[upgrade]', e); socket.destroy(); }
 });
 
 server.keepAliveTimeout = 65_000;
-server.requestTimeout = 120_000;
+// 0 = no limit on receiving a request body: file uploads and terminal streams can be long-lived.
+// headersTimeout (default 60s) still protects against slow-header clients.
+server.requestTimeout = 0;
 
 ensureAdmin();
 startBackgroundTasks();

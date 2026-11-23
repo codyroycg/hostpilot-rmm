@@ -10,6 +10,7 @@ COPY server/src ./src
 COPY server/public ./public
 COPY server/agents ./agents
 COPY server/seed-scripts ./seed-scripts
+COPY server/task-scripts ./task-scripts
 
 RUN mkdir -p /data && chown -R node:node /data
 USER node

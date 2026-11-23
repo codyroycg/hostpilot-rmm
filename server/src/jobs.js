@@ -3,6 +3,8 @@ import { uuid, shellSupported } from './util.js';
 
 // agentId -> Set<wake fn> for agents currently long-polling
 const waiters = new Map();
+// jobId -> Set<fn> for API calls waiting on a job result
+const jobWaiters = new Map();
 
 export function addWaiter(agentId, fn) {
   let set = waiters.get(agentId);
@@ -18,22 +20,45 @@ export function wakeAgent(agentId) {
 
 export const isPolling = (agentId) => waiters.has(agentId);
 
+/** Resolve when the job finishes or after ms (whichever first). */
+export function waitForJob(jobId, ms) {
+  return new Promise((resolve) => {
+    let set = jobWaiters.get(jobId);
+    if (!set) { set = new Set(); jobWaiters.set(jobId, set); }
+    const done = () => { clearTimeout(t); set.delete(done); if (!set.size) jobWaiters.delete(jobId); resolve(); };
+    const t = setTimeout(done, ms);
+    set.add(done);
+  });
+}
+
+export function notifyJobDone(jobId) {
+  const set = jobWaiters.get(jobId);
+  if (set) for (const fn of [...set]) fn();
+}
+
 /**
  * Queue a script on a set of agents. Agents whose OS can't run the shell are skipped.
- * @returns {{batch_id, created, skipped: string[]}}
+ * `build(agent)` may be given instead of shell/body to generate a per-platform script
+ * (returns {shell, body, displayBody} or null to skip that agent).
  */
-export function queueJobs({ agents, name, shell, body, timeout, scriptId = null, createdBy }) {
+export function queueJobs({ agents, name, shell, body, displayBody = null, timeout, scriptId = null, createdBy, task = null, build = null }) {
   const batchId = uuid();
   const t = Date.now();
   const created = [];
   const skipped = [];
   tx(() => {
     for (const a of agents) {
+      let sh = shell, bd = body, disp = displayBody, nm = name;
+      if (build) {
+        const b = build(a);
+        if (!b) { skipped.push(a.hostname || a.id); continue; }
+        sh = b.shell; bd = b.body; disp = b.displayBody ?? null; nm = b.name || name;
+      }
       // "_"-prefixed shells are internal agent commands (uninstall, remote control)
-      if (!shell.startsWith('_') && !shellSupported(shell, a.platform)) { skipped.push(a.hostname || a.id); continue; }
+      if (!sh.startsWith('_') && !shellSupported(sh, a.platform)) { skipped.push(a.hostname || a.id); continue; }
       const id = uuid();
-      run(`INSERT INTO jobs(id, batch_id, agent_id, script_id, name, shell, body, timeout, status, created_by, created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, batchId, a.id, scriptId, name, shell, body, timeout, 'queued', createdBy, t);
+      run(`INSERT INTO jobs(id, batch_id, agent_id, script_id, name, shell, body, display_body, timeout, status, created_by, created_at, task)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, batchId, a.id, scriptId, nm, sh, bd, disp, timeout, 'queued', createdBy, t, task);
       created.push({ id, agent_id: a.id });
     }
   });

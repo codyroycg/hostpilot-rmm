@@ -10,6 +10,11 @@ $SelfPath = $MyInvocation.MyCommand.Path
 $Cfg = Get-Content (Join-Path $Base 'config.json') -Raw | ConvertFrom-Json
 $Server = ([string]$Cfg.server).TrimEnd('/')
 $Headers = @{ 'X-Agent-Id' = [string]$Cfg.agent_id; 'X-Agent-Secret' = [string]$Cfg.secret }
+# inherited by job processes (file transfers need to know where to send data)
+$env:HOSTPILOT_SERVER = $Server
+$env:PYTHONIOENCODING = 'utf-8'
+$Utf8 = New-Object Text.UTF8Encoding $false
+$Oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
 $MyVersion = (Get-FileHash -Algorithm SHA256 -LiteralPath $SelfPath).Hash.Substring(0, 12).ToLower()
 $JobDir = Join-Path $Base 'jobs'
 $LogFile = Join-Path $Base 'agent.log'
@@ -102,9 +107,9 @@ function Send-Inventory {
 
 $Running = @{}
 
-function Read-Output([string]$Path) {
+function Read-Output([string]$Path, [Text.Encoding]$Encoding) {
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
-    $text = [IO.File]::ReadAllText($Path, [Text.Encoding]::Default)
+    $text = [IO.File]::ReadAllText($Path, $Encoding)
     if ($text.Length -gt $MaxOutput) { $text = $text.Substring($text.Length - $MaxOutput) }
     return $text
 }
@@ -213,7 +218,10 @@ function Start-AgentJob($Job) {
     switch ($Job.shell) {
         'powershell' {
             $file = "$stem.ps1"
-            [IO.File]::WriteAllText($file, [string]$Job.body, (New-Object Text.UTF8Encoding $true))
+            # make the job's stdout/stderr UTF-8 so non-ASCII text (file names, etc.) survives
+            $prefix = "try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding `$false } catch {}`r`n"
+            [IO.File]::WriteAllText($file, $prefix + [string]$Job.body, (New-Object Text.UTF8Encoding $true))
+            $enc = $Utf8
             $exe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
             $argList = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$file`""
         }
@@ -221,6 +229,7 @@ function Start-AgentJob($Job) {
             $file = "$stem.cmd"
             [IO.File]::WriteAllText($file, "@echo off`r`n" + ([string]$Job.body -replace "`r?`n", "`r`n"), [Text.Encoding]::Default)
             $exe = "$env:SystemRoot\System32\cmd.exe"
+            $enc = $Oem
             $argList = "/d /c `"$file`""
         }
         'python' {
@@ -230,6 +239,7 @@ function Start-AgentJob($Job) {
             if (-not $py) { Send-Result $id 127 '' 'python is not installed on this device' $false; return }
             $exe = $py.Source
             $argList = "`"$file`""
+            $enc = $Utf8
         }
         default {
             Send-Result $id 127 '' "Shell '$($Job.shell)' is not supported on Windows" $false
@@ -241,7 +251,7 @@ function Start-AgentJob($Job) {
         $proc = Start-Process -FilePath $exe -ArgumentList $argList -WorkingDirectory $JobDir -NoNewWindow -PassThru `
             -RedirectStandardOutput "$stem.out" -RedirectStandardError "$stem.err"
         $null = $proc.Handle  # keep handle so ExitCode is available later
-        $Running[$id] = @{ proc = $proc; stem = $stem; file = $file; deadline = (Get-Date).AddSeconds($timeout) }
+        $Running[$id] = @{ proc = $proc; stem = $stem; file = $file; enc = $enc; deadline = (Get-Date).AddSeconds($timeout) }
         Write-Log "job $id started ($($Job.shell), timeout ${timeout}s)"
     } catch {
         Send-Result $id 1 '' "Failed to start: $($_.Exception.Message)" $false
@@ -262,7 +272,7 @@ function Update-Jobs {
             }
             $code = if ($timedOut) { -1 } else { $p.ExitCode }
             if ($null -eq $code) { $code = -1 }
-            $r.result = @{ code = [int]$code; out = (Read-Output "$($r.stem).out"); err = (Read-Output "$($r.stem).err"); timedOut = $timedOut }
+            $r.result = @{ code = [int]$code; out = (Read-Output "$($r.stem).out" $r.enc); err = (Read-Output "$($r.stem).err" $r.enc); timedOut = $timedOut }
         }
         try {
             Send-Result $id $r.result.code $r.result.out $r.result.err $r.result.timedOut

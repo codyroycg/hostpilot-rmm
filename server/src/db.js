@@ -80,6 +80,25 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, ts INTEGER, username TEXT, action TEXT, detail TEXT);
 `);
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS updates(
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, uid TEXT, kb TEXT, title TEXT,
+  severity TEXT, category TEXT, size INTEGER);
+CREATE INDEX IF NOT EXISTS updates_idx ON updates(agent_id);
+`);
+
+// Additive column migrations for databases created by earlier versions.
+function addColumn(table, col, type) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+}
+addColumn('jobs', 'task', 'TEXT');
+addColumn('jobs', 'display_body', 'TEXT');
+addColumn('agents', 'updates_checked_at', 'INTEGER');
+addColumn('agents', 'pending_updates', 'INTEGER');
+addColumn('agents', 'security_updates', 'INTEGER');
+addColumn('agents', 'reboot_required', 'INTEGER DEFAULT 0');
+
 const stmtCache = new Map();
 function stmt(sql) {
   let s = stmtCache.get(sql);
@@ -108,6 +127,7 @@ export const SETTING_DEFAULTS = {
   metric_retention_days: 14,
   job_retention_days: 30,
   webhook_url: '',
+  update_scan_hours: 24,
 };
 
 export function getSettings() {
