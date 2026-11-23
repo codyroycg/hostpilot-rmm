@@ -10,6 +10,7 @@ import { evaluateThresholds, resolveAlert } from './alerts.js';
 import { onJobFinished } from './job-results.js';
 import { checkToken, receiveInto, sendFile } from './transfers.js';
 import { hostInput, hostOutput, hostClose } from './terminal.js';
+import { liveSample } from './live.js';
 
 const AGENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 
@@ -218,6 +219,9 @@ route('GET', '/api/transfer/:id', (ctx) => {
 route('GET', '/api/term/:id/in', (ctx) => hostInput(ctx));
 route('POST', '/api/term/:id/out', (ctx) => hostOutput(ctx), { raw: true });
 route('POST', '/api/term/:id/close', (ctx) => hostClose(ctx), { raw: true });
+
+// Live performance samples (token in the URL identifies the session)
+route('POST', '/api/live/:id', async (ctx) => sendText(ctx.res, 200, await liveSample(ctx)), { raw: true });
 
 // ---------- downloadable installers ----------
 // /download/<enrollment token>/<file>: the token is the secret (same as the one-line install commands),

@@ -117,6 +117,7 @@ export const TASKS = {
     },
   },
 
+  'metrics.live': { internal: true, title: () => 'Live performance monitor', timeout: 3600, args: (a) => ({ url: S(a.url) }) },
   'terminal.open': { internal: true, title: () => 'Terminal session', timeout: 12 * 3600, args: (a) => ({ in: S(a.in), out: S(a.out), close: S(a.close) }) },
 };
 

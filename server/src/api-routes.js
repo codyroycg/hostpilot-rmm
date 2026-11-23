@@ -5,6 +5,7 @@ import { queueJobs, isPolling, waitForJob } from './jobs.js';
 import { AGENT_VERSIONS } from './agent-routes.js';
 import { createRemoteSession } from './remote.js';
 import { createTerminalSession } from './terminal.js';
+import { startLive, readLive } from './live.js';
 import { getTask, buildTask, baseName } from './task-catalog.js';
 import { createTransfer, getTransfer, receiveInto, sendFile, removeTransfer } from './transfers.js';
 
@@ -680,6 +681,17 @@ route('GET', '/api/patching', (ctx) => {
     };
   });
 });
+
+// ---------- live performance (1-minute chart) ----------
+
+route('POST', '/api/agents/:id/live', (ctx) => {
+  const u = need(ctx);
+  const a = loadAgent(ctx.params.id);
+  if (!isOnline(a)) throw new HttpError(409, `${a.hostname} is offline`);
+  return startLive({ id: a.id, hostname: a.hostname, platform: a.platform }, u);
+});
+
+route('GET', '/api/agents/:id/live', (ctx) => { need(ctx); return readLive(ctx.params.id); });
 
 // ---------- terminal (Linux) ----------
 

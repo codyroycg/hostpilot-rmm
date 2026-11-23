@@ -121,7 +121,7 @@ function chart(rows, series, { hours = 24 } = {}) {
   const x = (ts) => ((ts - start) / (end - start)) * W;
   const y = (v) => H - (Math.max(0, Math.min(100, v)) / 100) * H;
   const grid = [25, 50, 75].map((g) => `<line class="grid-line" x1="0" x2="${W}" y1="${y(g)}" y2="${y(g)}"/>`).join('');
-  const gapMs = Math.max(5 * 60000, (hours * 3600000) / 150);
+  const gapMs = hours < 1 ? 10000 : Math.max(5 * 60000, (hours * 3600000) / 150);
   const paths = series.map(([key, , color]) => {
     let d = '', prev = null;
     for (const r of rows) {
@@ -132,7 +132,8 @@ function chart(rows, series, { hours = 24 } = {}) {
     return `<path d="${d}" stroke="${color}"/>`;
   }).join('');
   const legend = series.map(([, label, color]) => `<span><i style="background:${color}"></i>${label}</span>`).join('');
-  const t = (ms) => new Date(ms).toLocaleString([], hours > 48 ? { month: 'short', day: 'numeric' } : { hour: '2-digit', minute: '2-digit' });
+  const t = (ms) => new Date(ms).toLocaleString([], hours > 48 ? { month: 'short', day: 'numeric' }
+    : hours < 1 ? { hour: '2-digit', minute: '2-digit', second: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
   return `<div class="legend">${legend}</div>
     <svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${paths}</svg>
     <div class="chart-axis"><span>${t(start)}</span><span>${t((start + end) / 2)}</span><span>now</span></div>`;
@@ -397,20 +398,43 @@ async function devOverview(el, a) {
       <dl class="kv">${kv('CPU', meter(a.cpu_pct))}${kv('Memory', meter(a.mem_pct))}
       ${(a.disks || []).map((d) => kv(esc(d.mount), `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`)).join('')}</dl></div>
     <div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">Performance</h3>
-      <select id="m-hours" style="width:auto"><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select></div>
+      <select id="m-hours" style="width:auto"><option value="live">1 minute (live)</option><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select></div>
       <div id="m-chart" class="muted">Loading…</div></div>
     ${a.notes ? `<div class="card"><h3>Notes</h3><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>` : ''}
   </div>`;
+  const SERIES = [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']];
+  let liveTimer = null, lastStart = 0;
+  const stopLive = () => { clearInterval(liveTimer); liveTimer = null; };
+  const drawLive = async () => {
+    if (!document.body.contains($('#m-chart'))) return stopLive(); // navigated away
+    const r = await api('GET', `/api/agents/${a.id}/live`);
+    // (re)start the device-side sampler if it isn't running
+    if (!r.active && Date.now() - lastStart > 20000) { lastStart = Date.now(); await api('POST', `/api/agents/${a.id}/live`); }
+    $('#m-chart').innerHTML = r.samples.length
+      ? chart(r.samples, SERIES, { hours: 1 / 60 }) + '<div class="small muted">Live · a sample every 2 seconds</div>'
+      : '<div class="muted">Starting live monitoring on the device… (usually a few seconds)</div>';
+  };
   const drawChart = async () => {
-    const hours = Number($('#m-hours').value);
+    const sel = $('#m-hours')?.value;
+    if (!sel) return;
+    if (sel === 'live') {
+      if (!liveTimer) {
+        $('#m-chart').innerHTML = '<div class="muted">Starting live monitoring on the device…</div>';
+        lastStart = Date.now();
+        try { await api('POST', `/api/agents/${a.id}/live`); } catch (e) { $('#m-chart').innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+        liveTimer = setInterval(guard(drawLive), 2000);
+        state.timers.push(liveTimer);
+      }
+      return drawLive();
+    }
+    stopLive();
+    const hours = Number(sel);
     const rows = await api('GET', `/api/agents/${a.id}/metrics?hours=${hours}`);
-    $('#m-chart').innerHTML = rows.length
-      ? chart(rows, [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']], { hours })
-      : '<div class="muted">No metrics yet.</div>';
+    $('#m-chart').innerHTML = rows.length ? chart(rows, SERIES, { hours }) : '<div class="muted">No metrics yet.</div>';
   };
   $('#m-hours').addEventListener('change', guard(drawChart));
   await drawChart();
-  every(60000, drawChart);
+  every(60000, () => { if ($('#m-hours')?.value !== 'live') return drawChart(); });
 }
 
 function termEntryHtml(j) {
