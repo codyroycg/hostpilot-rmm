@@ -30,8 +30,13 @@ function toast(msg, type = 'ok') {
 
 function guard(fn) {
   return async (...args) => {
+    const nav = state.pageAbort;
     try { return await fn(...args); }
-    catch (e) { if (e.status !== 401) toast(e.message, 'error'); }
+    catch (e) {
+      // work started on a page the user has since left (a chart refresh, a poll) fails quietly
+      if (nav && nav !== state.pageAbort && e instanceof TypeError) return;
+      if (e.status !== 401) toast(e.message, 'error');
+    }
   };
 }
 
@@ -239,8 +244,13 @@ async function router() {
   state.pageAbort?.abort();
   state.pageAbort = new AbortController();
   view.innerHTML = '<div class="muted">Loading…</div>';
+  const nav = state.pageAbort;
   try { await r[1](view, ...hash.match(r[0]).slice(1)); }
-  catch (e) { if (e.status !== 401) view.innerHTML = `<div class="card">Error: ${esc(e.message)}</div>`; }
+  catch (e) {
+    // a page that was left while it was still loading must not paint its error over the page now shown
+    if (nav !== state.pageAbort) return;
+    if (e.status !== 401) view.innerHTML = `<div class="card">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 // ---------------- login ----------------
@@ -1389,6 +1399,7 @@ function chartPanel(a, id, series, { rate = false } = {}) {
     const r = await api('GET', `/api/agents/${a.id}/live`);
     // (re)start the device-side sampler if it isn't running
     if (!r.active && Date.now() - lastStart > 20000) { lastStart = Date.now(); await api('POST', `/api/agents/${a.id}/live`); }
+    if (!box()) return stopLive(); // left the page while waiting
     const rows = r.samples.filter((s) => series.some(([k]) => s[k] != null));
     box().innerHTML = rows.length
       ? chart(rows, series, { hours: 1 / 60, rate }) + '<div class="small muted">Live · a sample every 2 seconds</div>'
@@ -1401,7 +1412,8 @@ function chartPanel(a, id, series, { rate = false } = {}) {
       if (!liveTimer) {
         box().innerHTML = '<div class="muted">Starting live monitoring on the device…</div>';
         lastStart = Date.now();
-        try { await api('POST', `/api/agents/${a.id}/live`); } catch (e) { box().innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+        try { await api('POST', `/api/agents/${a.id}/live`); } catch (e) { if (box()) box().innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+        if (!box()) return;
         liveTimer = setInterval(guard(drawLive), 2000);
         state.timers.push(liveTimer);
       }
@@ -1410,6 +1422,7 @@ function chartPanel(a, id, series, { rate = false } = {}) {
     stopLive();
     const hours = Number(v);
     const rows = (await api('GET', `/api/agents/${a.id}/metrics?hours=${hours}`)).filter((r) => series.some(([k]) => r[k] != null));
+    if (!box() || sel() !== v) return; // left the page, or the range changed while loading
     box().innerHTML = rows.length ? chart(rows, series, { hours, rate })
       : `<div class="muted">${rate ? 'No network data yet. It appears after the agent has checked in twice with this version.' : 'No metrics yet.'}</div>`;
   };
