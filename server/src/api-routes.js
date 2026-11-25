@@ -10,7 +10,8 @@ import { normalizeCidr, presentNetDevice, NET_TYPES } from './netmap.js';
 import { ruleCatalog, cleanPolicy, policyTargets } from './policies.js';
 import { runPolicy } from './tasks.js';
 import { techSend, techRead, conversations, unreadSummary } from './chat.js';
-import { getTask, buildTask, baseName } from './task-catalog.js';
+import { getTask, buildTask, baseName, supportsTask } from './task-catalog.js';
+import { normMac, isPrivateV4, ipInCidr, broadcastFor, slash24, sendFromServer } from './wol.js';
 import { createTransfer, getTransfer, receiveInto, sendFile, removeTransfer } from './transfers.js';
 
 const SESSION_COOKIE = 'hp_session';
@@ -1086,6 +1087,73 @@ route('DELETE', '/api/net-devices/:id', (ctx) => {
   need(ctx, 'tech');
   run('DELETE FROM net_devices WHERE id=?', Number(ctx.params.id));
   return { ok: true };
+});
+
+// ---------- Wake-on-LAN ----------
+
+/**
+ * Sends magic packets for `macs` from an online HostPilot device on the same subnet as `ips`
+ * (preferring `prefer`, then devices of the same client), plus a best-effort broadcast from the server.
+ */
+async function wakeOnLan({ macs, ips, subnets = [], prefer = null, clientId = null, exclude = null, label, user }) {
+  const nets = [...subnets];
+  for (const n of all('SELECT subnet FROM networks')) if (ips.some((ip) => ipInCidr(ip, n.subnet))) nets.push(n.subnet);
+  for (const ip of ips) nets.push(slash24(ip));
+  const uniqNets = [...new Set(nets.filter((n) => broadcastFor(n)))];
+  if (!uniqNets.length) throw new HttpError(400, `HostPilot doesn't know which network ${label} is on (no private IPv4 address recorded).`);
+
+  const candidates = all('SELECT id, hostname, platform, client_id, ip_addrs, last_seen FROM agents WHERE id IS NOT ?', exclude)
+    .filter((r) => isOnline(r) && supportsTask('net.wake', r.platform))
+    .map((r) => ({ ...r, ips: r.ip_addrs ? JSON.parse(r.ip_addrs) : [] }));
+  let relay = null, subnet = uniqNets[0];
+  for (const n of uniqNets) {
+    const onNet = candidates.filter((r) => r.ips.some((ip) => ipInCidr(ip, n)))
+      .sort((x, y) => (y.id === prefer) - (x.id === prefer) || (y.client_id === clientId) - (x.client_id === clientId));
+    if (onNet.length) { relay = onNet[0]; subnet = n; break; }
+  }
+  const bcasts = [...new Set([broadcastFor(subnet), ...ips.filter((ip) => ipInCidr(ip, subnet)), '255.255.255.255'])];
+  let job = null;
+  if (relay) {
+    const r = queueJobs({
+      agents: [relay], name: `Wake-on-LAN ${label}`, task: 'net.wake', createdBy: user.username, timeout: 60,
+      build: (a) => buildTask('net.wake', a.platform, { macs: macs.join(','), bcasts: bcasts.join(','), label }, { allowInternal: true }),
+    });
+    job = r.jobs[0] || null;
+  }
+  const serverSent = await sendFromServer(macs, [broadcastFor(subnet), '255.255.255.255']);
+  audit(user.username, 'wake-on-lan', `${label} (${macs.join(', ')}) via ${relay ? relay.hostname : 'server only'}`);
+  return { macs, subnet, relay: relay ? { id: relay.id, hostname: relay.hostname } : null, job, server_sent: serverSent };
+}
+
+route('POST', '/api/agents/:id/wake', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  const ifaces = a.net_ifaces ? JSON.parse(a.net_ifaces) : [];
+  const physical = ifaces.filter((i) => !['vpn', 'virtual', 'bluetooth', 'cellular'].includes(i.kind));
+  // wired adapters first: most machines only wake from Ethernet
+  physical.sort((x, y) => (y.kind === 'ethernet') - (x.kind === 'ethernet'));
+  const macs = [...new Set(physical.map((i) => normMac(i.mac)).filter(Boolean))].slice(0, 8);
+  // also any MAC network discovery saw for this device
+  for (const d of all('SELECT mac FROM net_devices WHERE agent_id=? AND mac IS NOT NULL', a.id)) {
+    const m = normMac(d.mac);
+    if (m && !macs.includes(m)) macs.push(m);
+  }
+  if (!macs.length) throw new HttpError(400, `HostPilot doesn't know ${a.hostname}'s network adapter MAC address yet. It's recorded the next time the agent checks in.`);
+  const ips = [...new Set([...(a.ip_addrs ? JSON.parse(a.ip_addrs) : []), ...physical.flatMap((i) => i.ips || [])])].filter(isPrivateV4);
+  return wakeOnLan({ macs, ips, clientId: a.client_id, exclude: a.id, label: a.hostname, user: u });
+});
+
+route('POST', '/api/net-devices/:id/wake', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const d = get('SELECT * FROM net_devices WHERE id=?', Number(ctx.params.id));
+  if (!d) throw new HttpError(404, 'Device not found');
+  const mac = normMac(d.mac);
+  if (!mac) throw new HttpError(400, 'This device has no known MAC address');
+  const n = loadNetwork(d.network_id);
+  return wakeOnLan({
+    macs: [mac], ips: isPrivateV4(d.ip) ? [d.ip] : [], subnets: [n.subnet], prefer: n.probe_agent_id, clientId: n.client_id,
+    exclude: d.agent_id, label: d.name || d.hostname || d.ip || mac, user: u,
+  });
 });
 
 // subnets a device is on (from its IPs), to prefill "Add network"

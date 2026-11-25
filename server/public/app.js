@@ -751,7 +751,9 @@ function netDeviceModal(d, onSaved) {
       <div class="field"><label>Name</label><input type="text" name="name" maxlength="100" value="${esc(d.name || '')}" placeholder="${esc(d.hostname || d.ip)}"></div>
       <div class="field"><label>Type</label><select name="type"><option value="auto">Automatic (${esc((NET_TYPE_INFO[d.type] || [''])[0])})</option>
         ${NET_ORDER.map((t) => `<option value="${t}" ${d.type_manual && d.type === t ? 'selected' : ''}>${NET_TYPE_INFO[t][0]}</option>`).join('')}</select></div></div></form>` : ''}`,
-  { wide: true, foot: can('tech') ? '<button class="btn danger" id="nd-forget">Forget device</button><span class="grow"></span><button class="btn" data-action="close-modal">Close</button><button class="btn primary" form="nd-form">Save</button>' : '<button class="btn" data-action="close-modal">Close</button>' });
+  { wide: true, foot: can('tech') ? `<button class="btn danger" id="nd-forget">Forget device</button><span class="grow"></span>
+      ${d.mac ? `<button class="btn" data-action="wake" data-net="${d.id}" title="Send a Wake-on-LAN magic packet">⏻ Wake up</button>` : ''}
+      <button class="btn" data-action="close-modal">Close</button><button class="btn primary" form="nd-form">Save</button>` : '<button class="btn" data-action="close-modal">Close</button>' });
   $('#nd-form', m)?.addEventListener('submit', guard(async (e) => {
     e.preventDefault();
     const v = Object.fromEntries(new FormData(e.target));
@@ -1289,6 +1291,7 @@ async function pageDevice(view, id, tab = 'overview') {
       <div class="muted small" style="margin-top:4px">${osCell(a)} · ${classBadge(a.device_class)} · ${a.client_name ? `<a href="#/clients/${a.client_id}">${esc(a.client_name)}</a>` : 'No client'} · ${a.maintenance ? badge('maintenance', 'warn') : a.online ? badge('online', 'ok') : badge(`offline · ${fmtAgo(a.last_seen)}`, 'bad')}</div></div>
       <div class="row">${can('tech') && win ? `<a class="btn primary" href="/remote.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Remote control</a>${term('powershell', 'PowerShell')}${term('cmd', 'Command Prompt')}` : ''}
       ${can('tech') && !win ? `<a class="btn primary" href="/terminal.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Terminal</a>` : ''}
+      ${can('tech') ? `<button class="btn${a.online ? '' : ' primary'}" data-action="wake" data-id="${a.id}" title="Send a Wake-on-LAN magic packet from another HostPilot device on the same network">⏻ Wake up</button>` : ''}
       ${can('tech') ? `<button class="btn" data-action="run-on" data-ids="${a.id}">Run script</button><button class="btn" data-action="refresh-inv" data-id="${a.id}">Refresh inventory</button>` : ''}</div></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/devices/${a.id}/${k}" class="${k === tab ? 'active' : ''}">${l}</a>`).join('')}</nav>
     <div id="tab"></div>`;
@@ -1317,24 +1320,58 @@ async function devOverview(el, a) {
       ${kv('Agent version', `<span class="mono">${esc(a.agent_version)}</span>${a.update_pending ? ' ' + badge('update pending', 'info') : ''}`)}
       ${kv('Inventory', a.inventory_at ? fmtAgo(a.inventory_at) : 'pending')}${kv('Device ID', `<span class="mono small">${esc(a.id)}</span>`)}
     </dl></div>
-    <div class="card"><h3>Utilization</h3>
-      <dl class="kv">${kv('CPU', meter(a.cpu_pct))}
-      ${Array.isArray(a.core_load) && a.core_load.length ? kv(`Per core <span class="small muted">(${a.core_load.length})</span>`, coreGrid(a.core_load)) : ''}
-      ${kv('Memory', meter(a.mem_pct))}${kv('Uptime', a.boot_time ? fmtDur(Date.now() - a.boot_time) : '')}
-      ${(a.disks || []).map((d) => kv(can('tech') ? `<a href="#/devices/${a.id}/files" data-action="open-drive" data-id="${a.id}" data-path="${esc(drivePath(a, d.mount))}" title="Browse in Files">${esc(d.mount)}</a>` : esc(d.mount),
-        `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`)).join('')}</dl>
-      ${can('tech') ? `<div class="small muted">Click a drive to browse it · <a href="#/devices/${a.id}/hardware">Disk health & details</a></div>` : ''}</div>
+    <div class="card"><div class="row" style="justify-content:space-between;margin-bottom:12px"><h3 style="margin:0">Utilization</h3><span id="ov-live" class="small muted"></span></div>
+      <dl class="kv">${kv('CPU', `<div id="ov-cpu">${meter(a.cpu_pct)}</div>`)}
+      ${Array.isArray(a.core_load) && a.core_load.length ? kv(`Per core <span class="small muted">(${a.core_load.length})</span>`, `<div id="ov-cores">${coreGrid(a.core_load)}</div>`) : ''}
+      ${kv('Memory', `<div id="ov-mem">${meter(a.mem_pct)}</div>`)}${kv('Uptime', a.boot_time ? fmtDur(Date.now() - a.boot_time) : '')}
+      ${(a.disks || []).map((d) => {
+        const bar = `${meter(d.total ? ((d.total - d.free) / d.total) * 100 : null)}<div class="small muted">${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</div>`;
+        return kv(esc(d.mount), can('tech') ? `<a class="meter-link" href="#/devices/${a.id}/files" data-action="open-drive" data-id="${a.id}" data-path="${esc(drivePath(a, d.mount))}" title="Browse ${esc(d.mount)} in Files">${bar}</a>` : bar);
+      }).join('')}</dl>
+      ${can('tech') ? `<div class="small muted">Click a drive's bar to browse it · <a href="#/devices/${a.id}/hardware">Disk health, network interfaces & details</a></div>` : ''}</div>
     <div class="card"><h3>Monitored services</h3>${(a.services || []).length ? `<table class="dash"><tbody>${a.services.map((s) => `<tr><td><strong>${esc(s.display || s.name)}</strong>${s.display ? `<div class="small muted mono">${esc(s.name)}</div>` : ''}</td>
         <td class="small muted">${esc(s.start)}</td><td class="right">${s.status === 'running' ? badge('running', 'ok') : s.status === 'missing' ? badge('not installed', 'warn') : badge(s.status, 'bad')}</td></tr>`).join('')}</tbody></table>`
       : '<div class="small muted">No services are monitored on this device. Add them in Settings (all devices), on this device\'s Settings tab, or with a "Service running" policy rule. You get an alert when a monitored service stops.</div>'}</div>
     ${chartCard('perf', 'Performance')}
     ${chartCard('net', 'Network traffic')}
-    <div class="card" style="grid-column:1/-1"><h3>Network interfaces</h3>${ifaceTable(a.net_ifaces)}</div>
     ${a.notes ? `<div class="card"><h3>Notes</h3><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>` : ''}
   </div>`;
   const perf = chartPanel(a, 'perf', [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']]);
   const net = chartPanel(a, 'net', [['net_rx', 'Download', 'var(--c4)'], ['net_tx', 'Upload', 'var(--c5)']], { rate: true });
+  liveUtilization(a);
   await Promise.all([perf(), net()]);
+}
+
+/** Keeps the overview's CPU / per-core / memory meters current with the device's 2-second live sampler. */
+function liveUtilization(a) {
+  if (!a.online) return;
+  const tag = $('#ov-live');
+  let lastStart = 0, lastTs = 0, failed = false;
+  const tick = async () => {
+    if (!$('#ov-cpu') || failed) { clearInterval(timer); return; } // navigated away
+    let r = await api('GET', `/api/agents/${a.id}/live`);
+    if (!r.active && Date.now() - lastStart > 20000) {
+      lastStart = Date.now();
+      try { await api('POST', `/api/agents/${a.id}/live`); } catch (e) { failed = true; tag.textContent = ''; return; }
+      r = await api('GET', `/api/agents/${a.id}/live`);
+    }
+    const s = r.samples[r.samples.length - 1];
+    if (!s || s.ts === lastTs || !$('#ov-cpu')) {
+      if (!lastTs) tag.innerHTML = 'Connecting to live data…';
+      else if (Date.now() - lastTs > 10000) tag.innerHTML = 'Live data paused';
+      return;
+    }
+    lastTs = s.ts;
+    tag.innerHTML = '<span class="live-dot"></span>Live';
+    if (s.cpu != null) $('#ov-cpu').innerHTML = meter(s.cpu);
+    if (s.mem != null) $('#ov-mem').innerHTML = meter(s.mem);
+    const cores = $('#ov-cores');
+    if (cores && Array.isArray(s.cores) && s.cores.length) cores.innerHTML = coreGrid(s.cores.map((v) => Math.round(v)));
+  };
+  const safe = () => tick().catch(() => {}); // a hiccup shouldn't toast every 2 s
+  const timer = setInterval(safe, 2000);
+  state.timers.push(timer);
+  safe();
 }
 
 const chartCard = (id, title) => `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">${title}</h3>
@@ -1892,10 +1929,12 @@ const fmtHours = (h) => (h === '' || h == null ? '' : `${Number(h).toLocaleStrin
 const HEALTH_BADGE = { OK: ['Healthy', 'ok'], Warning: ['Warning', 'warn'], Failing: ['Failing', 'bad'], Unknown: ['Unknown', ''] };
 
 async function devHardware(el, a) {
-  if (!can('tech')) { el.innerHTML = '<div class="card">Hardware details require the tech role.</div>'; return; }
+  // network interfaces come from the regular check-in, so everyone can see them
+  const ifaces = `<div class="card" id="hw-net" style="margin-bottom:16px"><h3>Network interfaces</h3>${ifaceTable(a.net_ifaces)}</div>`;
+  if (!can('tech')) { el.innerHTML = ifaces + '<div class="card">Disk, USB and printer details require the tech role.</div>'; return; }
   const section = (id, title, extra = '') => `<div class="card" id="${id}" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;margin-bottom:10px">
     <h3 style="margin:0">${title}</h3><div class="row">${extra}<button class="btn sm" data-hw-refresh="${id}">Refresh</button></div></div><div class="hw-body muted">Loading…</div></div>`;
-  el.innerHTML = section('hw-disks', 'Disks')
+  el.innerHTML = section('hw-disks', 'Disks') + ifaces
     + section('hw-usb', 'USB devices', `<label class="check small"><input type="checkbox" id="usb-hubs"> Show hubs</label>
         <select id="usb-filter" style="width:auto"><option value="all">Connected & previously connected</option><option value="on">Connected only</option><option value="off">Not connected only</option></select>`)
     + section('hw-print', 'Printers & scanners');
@@ -2675,6 +2714,16 @@ const ACTIONS = {
       if (r.created) location.hash = `#/jobs/batch/${r.batch_id}`;
     }).catch((e) => toast(e.message, 'error'));
   }),
+  wake: async (el) => {
+    el.disabled = true;
+    try {
+      const r = await api('POST', el.dataset.net ? `/api/net-devices/${el.dataset.net}/wake` : `/api/agents/${el.dataset.id}/wake`);
+      toast(r.relay
+        ? `Wake-up sent via ${r.relay.hostname} (${r.subnet}). A machine that supports Wake-on-LAN usually starts within a minute.`
+        : `No online HostPilot device on ${r.subnet} to send it from, so only the server sent it. That only works when the server is on that network.`,
+      r.relay ? 'ok' : 'error');
+    } finally { el.disabled = false; }
+  },
   'open-drive': (el) => {
     if (!state.files) state.files = new Map();
     state.files.set(el.dataset.id, { path: el.dataset.path });

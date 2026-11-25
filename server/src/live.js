@@ -44,13 +44,15 @@ export async function liveSample(ctx) {
   const s = sessions.get(ctx.params.id);
   if (!s || !safeEqualHex(String(ctx.query.get('token') || ''), s.token)) return 'stop';
   let body = '';
-  for await (const c of ctx.req) { body += c; if (body.length > 200) break; }
+  for await (const c of ctx.req) { body += c; if (body.length > 4000) break; }
   if (Date.now() > s.until) { sessions.delete(ctx.params.id); return 'stop'; }
-  const [cpu, mem, disk, rx, tx] = body.trim().split(/\s+/);
+  // "cpu mem disk rx tx [core0,core1,…]" — rx/tx may be "-" when unknown
+  const [cpu, mem, disk, rx, tx, coreList] = body.trim().split(/\s+/);
+  const cores = coreList && coreList !== '-' ? coreList.split(',').slice(0, 512).map(num).filter((v) => v != null) : null;
   const now = Date.now();
   s.lastSample = now;
   const rate = (v) => { const n = Number(v); return v != null && v !== '' && Number.isFinite(n) && n >= 0 ? n : null; };
-  s.samples.push({ ts: now, cpu: num(cpu), mem: num(mem), disk: num(disk), net_rx: rate(rx), net_tx: rate(tx) });
+  s.samples.push({ ts: now, cpu: num(cpu), mem: num(mem), disk: num(disk), net_rx: rate(rx), net_tx: rate(tx), ...(cores?.length ? { cores } : {}) });
   while (s.samples.length && s.samples[0].ts < now - KEEP_MS) s.samples.shift();
   return 'ok';
 }

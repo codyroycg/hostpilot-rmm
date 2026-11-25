@@ -17,8 +17,12 @@ net_bytes() {
   if [ "$hw" -gt 0 ]; then echo "$hr $ht"; else echo "$r $t"; fi
 }
 
+# per logical CPU: "cpuN total idle"
+core_stats() { awk '/^cpu[0-9]+ /{ printf "%s %.0f %.0f\n", $1, $2+$3+$4+$5+$6+$7+$8+$9, $5+$6 }' /proc/stat; }
+
 read -r _ u n s i w q sq st _ < /proc/stat
 prev_total=$((u+n+s+i+w+q+sq+st)); prev_idle=$((i+w))
+prev_cores="$(core_stats)"
 read -r prev_rx prev_tx < <(net_bytes)
 prev_ns=$(date +%s%N)
 fails=0
@@ -30,6 +34,12 @@ while [ "$(date +%s)" -lt "$end" ] && [ "$fails" -lt 5 ]; do
   dt=$((total-prev_total)); di=$((idle-prev_idle))
   prev_total=$total; prev_idle=$idle
   cpu=$(awk -v t="$dt" -v i="$di" 'BEGIN{ if (t>0) printf "%.1f", (1-i/t)*100; else print 0 }')
+  cur_cores="$(core_stats)"
+  cores=$(printf '%s\n--\n%s\n' "$prev_cores" "$cur_cores" | awk '$1=="--"{ cur=1; next }
+    !cur { t[$1]=$2; i[$1]=$3; next }
+    { dt=$2-t[$1]; di=$3-i[$1]; printf "%s%.0f", (n++ ? "," : ""), (dt>0 ? (1-di/dt)*100 : 0) }')
+  prev_cores=$cur_cores
+  [ -n "$cores" ] || cores="-"
   mem=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{ if (t>0) printf "%.1f", (1-a/t)*100; else print 0 }' /proc/meminfo)
   disk=$(df -P -x tmpfs -x devtmpfs -x squashfs -x overlay 2>/dev/null | awk 'NR>1 && $2>0 { p=$3/$2*100; if (p>m) m=p } END{ printf "%.1f", m+0 }')
   read -r rx tx < <(net_bytes)
@@ -37,7 +47,8 @@ while [ "$(date +%s)" -lt "$end" ] && [ "$fails" -lt 5 ]; do
   rates=$(awk -v r1="$prev_rx" -v r2="$rx" -v t1="$prev_tx" -v t2="$tx" -v a="$prev_ns" -v b="$now_ns" \
     'BEGIN{ s=(b-a)/1e9; if (s>0 && r2>=r1 && t2>=t1) printf "%.0f %.0f", (r2-r1)/s, (t2-t1)/s }')
   prev_rx=$rx; prev_tx=$tx; prev_ns=$now_ns
-  if r=$(curl -fsS -m 10 -X POST -H 'Content-Type: text/plain' --data "$cpu $mem $disk $rates" "$url" 2>/dev/null); then
+  [ -n "$rates" ] || rates="- -"
+  if r=$(curl -fsS -m 10 -X POST -H 'Content-Type: text/plain' --data "$cpu $mem $disk $rates $cores" "$url" 2>/dev/null); then
     fails=0
     [ "$r" = "stop" ] && break
   else

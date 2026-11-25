@@ -15,6 +15,7 @@ while [ "$(date +%s)" -lt "$end" ] && [ "$fails" -lt 5 ]; do
   read -r rx tx <<< "$(net_bytes)"; now=$(date +%s)
   rates=$(awk -v r1="$prev_rx" -v r2="$rx" -v t1="$prev_tx" -v t2="$tx" -v a="$prev_t" -v b="$now" 'BEGIN { s = b - a; if (s > 0 && r2 >= r1 && t2 >= t1) printf "%.0f %.0f", (r2 - r1) / s, (t2 - t1) / s }')
   prev_rx=$rx; prev_tx=$tx; prev_t=$now
+  [ -n "$rates" ] || rates="- -"
   if r=$(curl -fsS -m 10 -X POST -H 'Content-Type: text/plain' --data "$cpu $mem $disk $rates" "$url" 2>/dev/null); then
     fails=0; [ "$r" = "stop" ] && break
   else fails=$((fails + 1)); fi

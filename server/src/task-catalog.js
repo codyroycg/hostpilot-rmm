@@ -215,6 +215,12 @@ export const TASKS = {
       return { subnet: need(S(a.subnet, 20), 'Subnet'), community };
     },
   },
+  'net.wake': {
+    internal: true, title: (a) => `Wake-on-LAN ${a.label}`.trim(), timeout: 60,
+    args: (a) => ({
+      macs: need(S(a.macs, 400), 'MAC address'), bcasts: need(S(a.bcasts, 200), 'Broadcast address'), label: S(a.label, 120),
+    }),
+  },
   'metrics.live': { internal: true, title: () => 'Live performance monitor', timeout: 3600, args: (a) => ({ url: S(a.url) }) },
   'terminal.open': {
     internal: true, title: (a) => ({ powershell: 'PowerShell session', cmd: 'Command Prompt session' }[a.shell] || 'Terminal session'), timeout: 12 * 3600,
@@ -239,7 +245,7 @@ function argsBlock(args, platform) {
 }
 
 // macOS: a task uses <task>.mac.sh when present, otherwise the Linux .sh only if it is known to be portable
-const MAC_PORTABLE = new Set(['files.get', 'files.put', 'files.rename', 'files.mkdir', 'hardware.printers']);
+const MAC_PORTABLE = new Set(['files.get', 'files.put', 'files.rename', 'files.mkdir', 'hardware.printers', 'net.wake']);
 function templateFor(task, platform) {
   if (platform === 'windows') return expand(`${task}.ps1`);
   if (platform === 'macos') return expand(`${task}.mac.sh`) ?? (MAC_PORTABLE.has(task) ? expand(`${task}.sh`) : null);
