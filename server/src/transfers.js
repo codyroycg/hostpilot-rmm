@@ -52,7 +52,8 @@ export function sendFile(t, res, { attachment }) {
   const headers = { 'Content-Type': 'application/octet-stream', 'Content-Length': fs.statSync(t.file).size, 'Cache-Control': 'no-store' };
   if (attachment) headers['Content-Disposition'] = `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(t.name)}`;
   res.writeHead(200, headers);
-  return pipeline(fs.createReadStream(t.file), res).catch(() => {});
+  // resolves true only when the whole file went out (an aborted download can be retried until the transfer expires)
+  return pipeline(fs.createReadStream(t.file), res).then(() => true, () => false);
 }
 
 export function removeTransfer(t) {

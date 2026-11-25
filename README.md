@@ -48,6 +48,7 @@ Manual removal: `sudo launchctl bootout system/com.hostpilot.agent; sudo rm -rf 
 - **Agent self-update**: change an agent script on the server and every agent updates itself on its next poll. You can also force an update from the web console (device **Settings → Update agent now**, or **More actions → Update HostPilot agent now** for many devices) or from the device itself (see below).
 - **Windows taskbar icon**: logged-in users see a HostPilot icon showing whether the agent is connected (green), disconnected (red), not running (grey) or updating (blue). Its menu has **Update agent now**. Turn it off under **Settings → Windows taskbar icon**.
 - **Agent uninstall** from the console.
+- **Android app for technicians**: the full console in an app (Android 8+), with push-style notifications for new alerts and end-user chat messages, file downloads to the phone's Downloads folder, and uploads from the phone. See [Android app](#android-app).
 
 ## Quick start
 
@@ -171,6 +172,44 @@ Unregister-ScheduledTask HostPilotAgent -Confirm:$false; Unregister-ScheduledTas
 ```bash
 sudo systemctl disable --now hostpilot-agent; sudo rm -rf /opt/hostpilot /etc/systemd/system/hostpilot-agent.service; sudo systemctl daemon-reload
 ```
+
+## Android app
+
+The `android/` folder is a small native app (Java, no third-party libraries). It shows the console in a WebView and adds:
+
+- **Notifications** for new alerts and for chat messages from end users. Tapping one opens that device or conversation. After you sign in, the phone registers itself (`POST /api/mobile/register`) and gets a token that can only read the notification feed. It's revoked when you sign out, change server, or an admin resets your password.
+  - By default the phone checks about every 15 minutes (Android stretches this while the phone sleeps).
+  - **Instant notifications** (in **Phone app settings** in the console menu) checks every minute and keeps a small notification in the status bar.
+- **Downloads** from the Files tab go to the phone's Downloads folder. **Uploads** use the phone's file picker.
+- Links to other sites, such as a device's web interface, open in the phone's browser.
+
+The server needs a certificate the phone trusts. A public domain behind Caddy gets one automatically. Plain `http://` on a LAN also works.
+
+### Building the APK
+
+GitHub Actions builds it (`.github/workflows/android.yml`) whenever something under `android/` changes, or when you run the workflow by hand (**Actions → Android app → Run workflow**).
+
+- The APK is attached to the run and published as the **android-latest** release: `https://github.com/<owner>/<repo>/releases/download/android-latest/HostPilot.apk`.
+- If the repository is private, you must be signed in to GitHub to download it.
+
+To install it, open that link on the phone, allow "install unknown apps" for the browser, then enter your server address (for example `https://rmm.example.com`).
+
+To keep updates installing over the old version, every build has to be signed with the same key. Create one once with `keytool`, which comes with any JDK:
+
+```powershell
+keytool -genkeypair -keystore hostpilot-release.jks -storetype PKCS12 -alias hostpilot -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=HostPilot RMM"
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("hostpilot-release.jks")) | Set-Clipboard
+```
+
+Then add these repository secrets under **Settings → Secrets and variables → Actions**:
+
+- `ANDROID_KEYSTORE_BASE64`: the clipboard contents
+- `ANDROID_KEYSTORE_PASSWORD`: the keystore password
+- `ANDROID_KEY_ALIAS`: `hostpilot`
+
+Keep the `.jks` file and its password safe, and don't commit them; `.gitignore` already excludes `*.jks`. Without the secrets, builds are signed with a throw-away debug key, so you have to uninstall the app before installing each new build.
+
+To build locally instead, open `android/` in Android Studio.
 
 ## Configuration
 

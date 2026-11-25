@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS chat_messages(
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, direction TEXT NOT NULL,
   author TEXT, body TEXT NOT NULL, created_at INTEGER, read_at INTEGER);
 CREATE INDEX IF NOT EXISTS chat_idx ON chat_messages(agent_id, id);
+CREATE TABLE IF NOT EXISTS mobile_devices(
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT, created_at INTEGER, last_seen INTEGER);
 `);
 addColumn('agents', 'chat_token', 'TEXT');
 addColumn('users', 'dashboard', 'TEXT');

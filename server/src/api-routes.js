@@ -708,6 +708,7 @@ route('PUT', '/api/users/:id', (ctx) => {
     if (password.length < 10) throw new HttpError(400, 'Password must be at least 10 characters');
     run('UPDATE users SET password_hash=? WHERE id=?', hashPassword(password), target.id);
     run('DELETE FROM sessions WHERE user_id=?', target.id);
+    run('DELETE FROM mobile_devices WHERE user_id=?', target.id);
   }
   audit(u.username, 'user.update', target.username);
   return { ok: true };
@@ -718,6 +719,7 @@ route('DELETE', '/api/users/:id', (ctx) => {
   const target = get('SELECT * FROM users WHERE id=?', Number(ctx.params.id));
   if (!target) throw new HttpError(404, 'User not found');
   if (target.id === u.id) throw new HttpError(400, "You can't delete yourself");
+  run('DELETE FROM mobile_devices WHERE user_id=?', target.id);
   run('DELETE FROM users WHERE id=?', target.id);
   audit(u.username, 'user.delete', target.username);
   return { ok: true };
@@ -798,7 +800,7 @@ route('GET', '/api/transfers/:id', (ctx) => {
   if (!t || t.userId !== u.id || t.direction !== 'to-server') throw new HttpError(404, 'Transfer not found');
   if (!t.ready) return { ready: false };
   if (ctx.query.get('check') === '1') return { ready: true, size: t.size, name: t.name };
-  return sendFile(t, ctx.res, { attachment: true }).then(() => removeTransfer(t));
+  return sendFile(t, ctx.res, { attachment: true }).then((done) => { if (done) removeTransfer(t); });
 });
 
 route('POST', '/api/agents/:id/files/upload', async (ctx) => {
@@ -1112,6 +1114,59 @@ route('POST', '/api/agents/:id/terminal', (ctx) => {
   const a = loadAgent(ctx.params.id);
   const shell = a.platform === 'windows' ? (ctx.body.shell === 'cmd' ? 'cmd' : 'powershell') : 'bash';
   return createTerminalSession({ id: a.id, hostname: a.hostname, platform: a.platform }, u, shell);
+});
+
+// ---------- Android app ----------
+// The app signs in through the normal console (WebView), then registers for a notification token.
+// That token can only read the notification feed below, so a lost phone can't drive devices with it.
+
+function mobileDevice(ctx) {
+  const m = /^Bearer ([a-f0-9]{64})$/.exec(String(ctx.req.headers.authorization || ''));
+  const d = m && get(`SELECT d.token_hash, u.id, u.username, u.role FROM mobile_devices d JOIN users u ON u.id=d.user_id
+                      WHERE d.token_hash=?`, sha256(m[1]));
+  if (!d) throw new HttpError(401, 'This phone is no longer registered. Open the app and sign in again.');
+  run('UPDATE mobile_devices SET last_seen=? WHERE token_hash=?', Date.now(), d.token_hash);
+  return d;
+}
+
+route('POST', '/api/mobile/register', (ctx) => {
+  const u = need(ctx);
+  const name = String(ctx.body.name || 'Android phone').replace(/[\r\n\t]/g, ' ').slice(0, 80);
+  const tok = randHex(32);
+  // one token per phone: re-registering the same phone (same install id) replaces its old token
+  const install = String(ctx.body.install_id || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 64);
+  if (install) run('DELETE FROM mobile_devices WHERE user_id=? AND name LIKE ?', u.id, `%[${install}]`);
+  run('INSERT INTO mobile_devices(token_hash, user_id, name, created_at, last_seen) VALUES(?,?,?,?,?)',
+    sha256(tok), u.id, install ? `${name} [${install}]` : name, Date.now(), Date.now());
+  audit(u.username, 'mobile.register', name);
+  const lastAlert = get('SELECT MAX(id) AS n FROM alerts').n || 0;
+  const lastChat = get('SELECT MAX(id) AS n FROM chat_messages').n || 0;
+  return { token: tok, alerts_after: lastAlert, chat_after: lastChat };
+});
+
+route('DELETE', '/api/mobile/register', (ctx) => {
+  const d = mobileDevice(ctx);
+  run('DELETE FROM mobile_devices WHERE token_hash=?', d.token_hash);
+  return { ok: true };
+});
+
+route('GET', '/api/mobile/notifications', (ctx) => {
+  mobileDevice(ctx);
+  const alertsAfter = clampInt(ctx.query.get('alerts_after'), 0, Number.MAX_SAFE_INTEGER, 0);
+  const chatAfter = clampInt(ctx.query.get('chat_after'), 0, Number.MAX_SAFE_INTEGER, 0);
+  const alerts = all(`SELECT al.id, al.agent_id, a.hostname, al.severity, al.type, al.message, al.created_at
+                      FROM alerts al JOIN agents a ON a.id=al.agent_id
+                      WHERE al.id>? AND al.status='open' ORDER BY al.id LIMIT 20`, alertsAfter);
+  const chat = all(`SELECT m.id, m.agent_id, a.hostname, m.author, m.body, m.created_at
+                    FROM chat_messages m JOIN agents a ON a.id=m.agent_id
+                    WHERE m.id>? AND m.direction='user' AND m.read_at IS NULL ORDER BY m.id LIMIT 20`, chatAfter);
+  return {
+    alerts, chat,
+    alerts_after: Math.max(alertsAfter, ...alerts.map((x) => x.id)),
+    chat_after: Math.max(chatAfter, ...chat.map((x) => x.id)),
+    open_alerts: get("SELECT COUNT(*) AS n FROM alerts WHERE status='open'").n,
+    unread_chat: get("SELECT COUNT(*) AS n FROM chat_messages WHERE direction='user' AND read_at IS NULL").n,
+  };
 });
 
 // Bootstrap the first admin account.

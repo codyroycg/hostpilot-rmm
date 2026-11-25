@@ -3,3 +3,5 @@
 .env
 *.md
 .git
+android
+.github

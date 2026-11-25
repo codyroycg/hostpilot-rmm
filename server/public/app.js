@@ -171,7 +171,8 @@ function renderShell() {
   $('#root').innerHTML = `<div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand"><img src="/favicon.svg" alt="">HostPilot RMM</div>
-      <nav class="nav">${NAV.map((n) => (n ? `<a href="${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? `<span class="badge hidden" id="nav-${n[2]}"></span>` : ''}</a>` : '<div class="sep"></div>')).join('')}</nav>
+      <nav class="nav">${NAV.map((n) => (n ? `<a href="${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? `<span class="badge hidden" id="nav-${n[2]}"></span>` : ''}</a>` : '<div class="sep"></div>')).join('')}
+        ${window.HostPilotApp ? '<a href="#" data-action="app-settings">Phone app settings</a>' : ''}</nav>
     </aside>
     <div class="sidebar-scrim" data-action="toggle-menu"></div>
     <div class="main">
@@ -183,6 +184,8 @@ function renderShell() {
     </div></div>`;
   updateAlertBadge();
   setInterval(guard(updateAlertBadge), 30000);
+  // inside the Android app: let it register this phone for alert / chat notifications
+  try { window.HostPilotApp?.signedIn(state.user.username); } catch { /* older app */ }
 }
 
 async function updateAlertBadge() {
@@ -2657,7 +2660,11 @@ const ACTIONS = {
   'close-modal': () => closeModal(),
   'modal-backdrop': (el, e) => { if (e.target === el) closeModal(); },
   'toggle-menu': () => $('#sidebar').classList.toggle('open'),
-  logout: async () => { await api('POST', '/api/logout'); state.user = null; renderLogin(); },
+  logout: async () => {
+    try { window.HostPilotApp?.signedOut(); } catch { /* older app */ }
+    await api('POST', '/api/logout'); state.user = null; renderLogin();
+  },
+  'app-settings': () => { try { window.HostPilotApp?.openSettings(); } catch { /* older app */ } },
   copy: (el) => copyText(el.dataset.text),
   'run-selected': () => openRunModal([...state.selected]),
   'run-on': (el) => openRunModal(el.dataset.ids.split(',')),
