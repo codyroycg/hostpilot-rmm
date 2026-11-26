@@ -3,6 +3,7 @@ import { get, run, tx } from './db.js';
 import { notifyJobDone } from './jobs.js';
 import { ingestScan } from './netmap.js';
 import { ingestPolicyResult } from './policies.js';
+import { ingestRoles } from './roles.js';
 
 function parseUpdates(agentId, stdout) {
   const updates = [];
@@ -13,6 +14,8 @@ function parseUpdates(agentId, stdout) {
       updates.push({ uid: f[1], kb: f[2], severity: f[3], category: f[4], size: Number(f[5]) || 0, title: f.slice(6).join(' ') });
     } else if (f[0] === 'R') {
       reboot = f[1] === '1' ? 1 : 0;
+    } else if (f[0] === 'W') {
+      run('UPDATE agents SET wsus=? WHERE id=?', f[1] === '1' ? 1 : 0, agentId);
     }
   }
   if (reboot === null) return; // scan didn't complete
@@ -38,5 +41,11 @@ export function onJobFinished(jobId) {
   if (j.task === 'updates.install') run('UPDATE agents SET want_inventory=1 WHERE id=?', j.agent_id);
   if (j.task === 'net.scan') { try { ingestScan(j); } catch (e) { console.error('[netscan]', e); } }
   if (j.task === 'policy.run') { try { ingestPolicyResult(j); } catch (e) { console.error('[policy]', e); } }
+  if (j.task === 'roles.detect') { try { ingestRoles(j); } catch (e) { console.error('[roles]', e); } }
+  if (j.task === 'screenshot.take' && j.status !== 'success') {
+    // the device couldn't capture (locked screen, nobody signed in…): fail the waiting request right away
+    const url = /screenshot-upload\/([a-f0-9]+)/.exec(String(j.display_body || ''))?.[1];
+    if (url) run("UPDATE screenshots SET status='failed', token=NULL WHERE id=? AND status='pending'", url);
+  }
   notifyJobDone(j.id);
 }

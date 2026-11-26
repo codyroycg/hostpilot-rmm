@@ -10,6 +10,10 @@ foreach ($u in $result.Updates) {
     $sev = [string]$u.MsrcSeverity
     "U`t$($u.Identity.UpdateID)`t$kb`t$sev`t$cat`t$([long]$u.MaxDownloadSize)`t$($u.Title -replace "[`t`r`n]", ' ')"
 }
+# W: Windows Update is pointed at a WSUS server by Group Policy (HostPilot's patching then can't see all updates)
+$wsus = 0
+try { if ((Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -ErrorAction Stop).UseWUServer -eq 1) { $wsus = 1 } } catch {}
+"W`t$wsus"
 $reboot = $false
 try { $reboot = (New-Object -ComObject Microsoft.Update.SystemInfo).RebootRequired } catch {}
 "R`t$([int][bool]$reboot)"

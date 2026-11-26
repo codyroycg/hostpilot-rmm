@@ -3,6 +3,8 @@ import { queueJobs, isPolling } from './jobs.js';
 import { openAlert } from './alerts.js';
 import { buildTask } from './task-catalog.js';
 import { policyTargets, buildPolicyScript } from './policies.js';
+import { runPatchWindows } from './patching.js';
+import { expireShots } from './screenshots.js';
 
 // Periodically scan online devices for OS updates (a few at a time).
 function autoUpdateScan() {
@@ -18,6 +20,23 @@ function autoUpdateScan() {
     agents: due, name: 'Scan for OS updates', task: 'updates.scan', timeout: 3600, createdBy: 'scheduler',
     build: (a) => buildTask('updates.scan', a.platform, {}),
   });
+}
+
+// Detect server roles (for role-based monitoring) on online Windows / Linux devices, a few at a time.
+export function queueRoleDetect(agents, createdBy) {
+  return queueJobs({
+    agents: agents.filter((a) => a.platform === 'windows' || a.platform === 'linux'), name: 'Detect server roles', task: 'roles.detect',
+    timeout: 300, createdBy, build: (a) => buildTask('roles.detect', a.platform, {}, { allowInternal: true }),
+  });
+}
+function autoRoleDetect() {
+  const { role_scan_hours } = getSettings();
+  if (!role_scan_hours) return;
+  const due = all(`SELECT id, hostname, platform FROM agents a WHERE platform IN ('windows','linux') AND (roles_at IS NULL OR roles_at < ?)
+                   AND last_seen > ? AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.agent_id=a.id AND j.task='roles.detect'
+                   AND (j.status IN ('queued','running') OR j.created_at > ?)) LIMIT 20`,
+  Date.now() - role_scan_hours * 3600000, Date.now() - 3 * 60000, Date.now() - 6 * 3600000);
+  if (due.length) queueRoleDetect(due, 'scheduler');
 }
 
 // Rescan discovered networks on their schedule (scan_hours; 0 = manual only).
@@ -111,6 +130,7 @@ function prune() {
   run("DELETE FROM alerts WHERE status='resolved' AND resolved_at < ?", t - 90 * 86400000);
   run('DELETE FROM sessions WHERE expires_at < ?', t);
   run('DELETE FROM audit WHERE ts < ?', t - 365 * 86400000);
+  run('DELETE FROM device_events WHERE ts < ?', t - 365 * 86400000);
 }
 
 function safe(name, fn) {
@@ -128,4 +148,8 @@ export function startBackgroundTasks() {
   setInterval(() => networkScans().catch((e) => console.error('[task:netscan]', e)), 10 * 60_000);
   setTimeout(safe('update-scan', autoUpdateScan), 90_000);
   setTimeout(safe('prune', prune), 10_000);
+  setInterval(safe('roles', autoRoleDetect), 10 * 60_000);
+  setTimeout(safe('roles', autoRoleDetect), 120_000);
+  setInterval(() => runPatchWindows().catch((e) => console.error('[task:patch]', e)), 60_000);
+  setInterval(safe('screenshots', expireShots), 60_000);
 }

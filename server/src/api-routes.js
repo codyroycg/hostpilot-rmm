@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { route, clientIp, publicUrl } from './router.js';
 import { all, get, run, tx, getSettings, saveSettings, audit, SETTING_DEFAULTS } from './db.js';
 import { HttpError, randHex, sha256, hashPassword, verifyPassword, SHELLS, clampInt } from './util.js';
@@ -8,10 +9,17 @@ import { createTerminalSession } from './terminal.js';
 import { startLive, readLive } from './live.js';
 import { normalizeCidr, presentNetDevice, NET_TYPES } from './netmap.js';
 import { ruleCatalog, cleanPolicy, policyTargets } from './policies.js';
-import { runPolicy } from './tasks.js';
+import { runPolicy, queueRoleDetect } from './tasks.js';
+import { deviceHistory } from './history.js';
+import { createShot, listShots, shotFile, deleteShot } from './screenshots.js';
+import { PACKS, roleDashboard, savePackLevels } from './roles.js';
+import {
+  CATEGORIES, categorize, ukey, listPolicies, presentPolicy as presentPatchPolicy, cleanPatchPolicy, effectivePolicy, approvalFor, manualApprovals,
+  setApprovals, approvalQueue, patchDevices, patchDashboard, describeWindow, patchTimeZone,
+} from './patching.js';
 import { techSend, techRead, conversations, unreadSummary } from './chat.js';
 import { getTask, buildTask, baseName, supportsTask } from './task-catalog.js';
-import { normMac, isPrivateV4, ipInCidr, broadcastFor, slash24, sendFromServer } from './wol.js';
+import { normMac, isPrivateV4, wakeOnLan, agentWakeTarget } from './wol.js';
 import { createTransfer, getTransfer, receiveInto, sendFile, removeTransfer } from './transfers.js';
 
 const SESSION_COOKIE = 'hp_session';
@@ -134,12 +142,14 @@ function presentAgent(a) {
     online: isPolling(a.id) || (a.last_seen && Date.now() - a.last_seen < ONLINE_WINDOW),
     maintenance: !!a.maintenance,
     update_pending: a.agent_version && AGENT_VERSIONS[a.platform] && a.agent_version !== AGENT_VERSIONS[a.platform],
+    roles: json(a.roles, []).map((r) => ({ ...r, label: PACKS[r.id]?.label || r.id })),
+    wsus: !!a.wsus,
   };
 }
 
-const AGENT_SELECT = `SELECT a.*, c.name AS client_name,
+const AGENT_SELECT = `SELECT a.*, c.name AS client_name, ct.name AS contact_name, ct.email AS contact_email, ct.phone AS contact_phone,
   (SELECT COUNT(*) FROM alerts al WHERE al.agent_id=a.id AND al.status IN ('open','ack')) AS open_alerts
-  FROM agents a LEFT JOIN clients c ON c.id=a.client_id`;
+  FROM agents a LEFT JOIN clients c ON c.id=a.client_id LEFT JOIN contacts ct ON ct.id=a.contact_id`;
 
 function loadAgent(id) {
   const a = get(`${AGENT_SELECT} WHERE a.id=?`, id);
@@ -322,6 +332,7 @@ route('GET', '/api/clients/:id', (ctx) => {
   c.tokens = ROLE_RANK[ctx.user.role] >= ROLE_RANK.tech
     ? all('SELECT * FROM enroll_tokens WHERE client_id=? ORDER BY created_at DESC', c.id) : [];
   c.server_url = publicUrl(ctx.req);
+  c.contacts = all('SELECT * FROM contacts WHERE client_id=? ORDER BY name COLLATE NOCASE', c.id);
   return c;
 });
 
@@ -385,9 +396,19 @@ route('PUT', '/api/agents/:id', (ctx) => {
   run('UPDATE agents SET client_id=?, notes=?, maintenance=? WHERE id=?', clientId,
     b.notes === undefined ? a.notes : String(b.notes), b.maintenance === undefined ? a.maintenance : (b.maintenance ? 1 : 0), a.id);
   if (b.maintenance) run("UPDATE alerts SET status='resolved', resolved_at=? WHERE agent_id=? AND status IN ('open','ack')", Date.now(), a.id);
+  if (b.contact_id !== undefined) {
+    const cid = b.contact_id ? Number(b.contact_id) : null;
+    if (cid && !get('SELECT id FROM contacts WHERE id=?', cid)) throw new HttpError(400, 'Unknown contact');
+    run('UPDATE agents SET contact_id=? WHERE id=?', cid, a.id);
+  }
+  if (b.patch_override !== undefined) {
+    const o = b.patch_override === 'none' ? 'none' : b.patch_override ? String(Number(b.patch_override)) : null;
+    if (o && o !== 'none' && !get('SELECT id FROM patch_policies WHERE id=?', Number(o))) throw new HttpError(400, 'Unknown patch policy');
+    run('UPDATE agents SET patch_override=? WHERE id=?', o, a.id);
+  }
   if (b.watch_services !== undefined) {
     const list = String(b.watch_services || '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
-    if (list.some((x) => !/^[\w.@:+-]{1,100}$/.test(x))) throw new HttpError(400, 'Service names may only contain letters, digits and . _ - @ : +');
+    if (list.some((x) => !/^[\w.@:+$-]{1,100}$/.test(x))) throw new HttpError(400, 'Service names may only contain letters, digits and . _ - @ : + $');
     run('UPDATE agents SET watch_services=? WHERE id=?', list.join(','), a.id);
     // stop alerting for services that are no longer watched
     for (const al of all("SELECT id, type FROM alerts WHERE agent_id=? AND type LIKE 'service:%' AND status IN ('open','ack')", a.id)) {
@@ -1091,56 +1112,13 @@ route('DELETE', '/api/net-devices/:id', (ctx) => {
 
 // ---------- Wake-on-LAN ----------
 
-/**
- * Sends magic packets for `macs` from an online HostPilot device on the same subnet as `ips`
- * (preferring `prefer`, then devices of the same client), plus a best-effort broadcast from the server.
- */
-async function wakeOnLan({ macs, ips, subnets = [], prefer = null, clientId = null, exclude = null, label, user }) {
-  const nets = [...subnets];
-  for (const n of all('SELECT subnet FROM networks')) if (ips.some((ip) => ipInCidr(ip, n.subnet))) nets.push(n.subnet);
-  for (const ip of ips) nets.push(slash24(ip));
-  const uniqNets = [...new Set(nets.filter((n) => broadcastFor(n)))];
-  if (!uniqNets.length) throw new HttpError(400, `HostPilot doesn't know which network ${label} is on (no private IPv4 address recorded).`);
-
-  const candidates = all('SELECT id, hostname, platform, client_id, ip_addrs, last_seen FROM agents WHERE id IS NOT ?', exclude)
-    .filter((r) => isOnline(r) && supportsTask('net.wake', r.platform))
-    .map((r) => ({ ...r, ips: r.ip_addrs ? JSON.parse(r.ip_addrs) : [] }));
-  let relay = null, subnet = uniqNets[0];
-  for (const n of uniqNets) {
-    const onNet = candidates.filter((r) => r.ips.some((ip) => ipInCidr(ip, n)))
-      .sort((x, y) => (y.id === prefer) - (x.id === prefer) || (y.client_id === clientId) - (x.client_id === clientId));
-    if (onNet.length) { relay = onNet[0]; subnet = n; break; }
-  }
-  const bcasts = [...new Set([broadcastFor(subnet), ...ips.filter((ip) => ipInCidr(ip, subnet)), '255.255.255.255'])];
-  let job = null;
-  if (relay) {
-    const r = queueJobs({
-      agents: [relay], name: `Wake-on-LAN ${label}`, task: 'net.wake', createdBy: user.username, timeout: 60,
-      build: (a) => buildTask('net.wake', a.platform, { macs: macs.join(','), bcasts: bcasts.join(','), label }, { allowInternal: true }),
-    });
-    job = r.jobs[0] || null;
-  }
-  const serverSent = await sendFromServer(macs, [broadcastFor(subnet), '255.255.255.255']);
-  audit(user.username, 'wake-on-lan', `${label} (${macs.join(', ')}) via ${relay ? relay.hostname : 'server only'}`);
-  return { macs, subnet, relay: relay ? { id: relay.id, hostname: relay.hostname } : null, job, server_sent: serverSent };
-}
 
 route('POST', '/api/agents/:id/wake', async (ctx) => {
   const u = need(ctx, 'tech');
   const a = loadAgent(ctx.params.id);
-  const ifaces = a.net_ifaces ? JSON.parse(a.net_ifaces) : [];
-  const physical = ifaces.filter((i) => !['vpn', 'virtual', 'bluetooth', 'cellular'].includes(i.kind));
-  // wired adapters first: most machines only wake from Ethernet
-  physical.sort((x, y) => (y.kind === 'ethernet') - (x.kind === 'ethernet'));
-  const macs = [...new Set(physical.map((i) => normMac(i.mac)).filter(Boolean))].slice(0, 8);
-  // also any MAC network discovery saw for this device
-  for (const d of all('SELECT mac FROM net_devices WHERE agent_id=? AND mac IS NOT NULL', a.id)) {
-    const m = normMac(d.mac);
-    if (m && !macs.includes(m)) macs.push(m);
-  }
-  if (!macs.length) throw new HttpError(400, `HostPilot doesn't know ${a.hostname}'s network adapter MAC address yet. It's recorded the next time the agent checks in.`);
-  const ips = [...new Set([...(a.ip_addrs ? JSON.parse(a.ip_addrs) : []), ...physical.flatMap((i) => i.ips || [])])].filter(isPrivateV4);
-  return wakeOnLan({ macs, ips, clientId: a.client_id, exclude: a.id, label: a.hostname, user: u });
+  const t = agentWakeTarget(a);
+  if (!t.macs.length) throw new HttpError(400, `HostPilot doesn't know ${a.hostname}'s network adapter MAC address yet. It's recorded the next time the agent checks in.`);
+  return wakeOnLan({ ...t, clientId: a.client_id, exclude: a.id, label: a.hostname, user: u });
 });
 
 route('POST', '/api/net-devices/:id/wake', async (ctx) => {
@@ -1182,6 +1160,283 @@ route('POST', '/api/agents/:id/terminal', (ctx) => {
   const a = loadAgent(ctx.params.id);
   const shell = a.platform === 'windows' ? (ctx.body.shell === 'cmd' ? 'cmd' : 'powershell') : 'bash';
   return createTerminalSession({ id: a.id, hostname: a.hostname, platform: a.platform }, u, shell);
+});
+
+// ---------- user preferences: favorites, device list columns, theme ----------
+
+const THEMES = ['auto', 'light', 'dark'];
+function readPrefs(userId) {
+  let p = {};
+  try { p = JSON.parse(get('SELECT prefs FROM users WHERE id=?', userId)?.prefs || '{}') || {}; } catch { p = {}; }
+  return { favorites: Array.isArray(p.favorites) ? p.favorites : [], columns: Array.isArray(p.columns) ? p.columns : null,
+    theme: THEMES.includes(p.theme) ? p.theme : 'auto', show_ids: !!p.show_ids };
+}
+route('GET', '/api/me/prefs', (ctx) => readPrefs(need(ctx).id));
+route('PUT', '/api/me/prefs', (ctx) => {
+  const u = need(ctx);
+  const b = ctx.body, cur = readPrefs(u.id);
+  if (b.favorites !== undefined) {
+    if (!Array.isArray(b.favorites)) throw new HttpError(400, 'Bad favorites');
+    cur.favorites = b.favorites.slice(0, 40).map((f) => ({ href: String(f?.href || ''), label: String(f?.label || '').slice(0, 80) }))
+      .filter((f) => /^#\/[\w/.-]{0,200}$/.test(f.href) && f.label);
+  }
+  if (b.columns !== undefined) cur.columns = b.columns === null ? null : (Array.isArray(b.columns) ? b.columns : []).map(String).filter((c) => /^[a-z_]{1,30}$/.test(c)).slice(0, 40);
+  if (b.theme !== undefined) cur.theme = THEMES.includes(b.theme) ? b.theme : 'auto';
+  if (b.show_ids !== undefined) cur.show_ids = !!b.show_ids;
+  run('UPDATE users SET prefs=? WHERE id=?', JSON.stringify(cur), u.id);
+  return cur;
+});
+
+// ---------- notification bell: jobs you started that finished ----------
+
+route('GET', '/api/me/notifications', (ctx) => {
+  const u = need(ctx);
+  const since = clampInt(ctx.query.get('since'), 0, Number.MAX_SAFE_INTEGER, Date.now() - 86400000);
+  const items = all(`SELECT j.id, j.name, j.status, j.finished_at, j.agent_id, a.hostname FROM jobs j JOIN agents a ON a.id=j.agent_id
+                     WHERE j.created_by=? AND j.finished_at > ? AND j.status NOT IN ('queued','running')
+                       AND COALESCE(j.task,'') NOT IN ('metrics.live','terminal.open','files.list','users.list','software.search','proc.list','svc.list','reg.list','fw.list')
+                       AND j.shell!='_remote' ORDER BY j.finished_at DESC LIMIT 30`, u.username, since);
+  return { now: Date.now(), items };
+});
+
+// ---------- global search (devices by name / ID / IP / serial / user, clients, scripts, contacts) ----------
+
+route('GET', '/api/search', (ctx) => {
+  need(ctx);
+  const q = String(ctx.query.get('q') || '').trim().toLowerCase().slice(0, 100);
+  if (!q) return { devices: [], clients: [], scripts: [], contacts: [] };
+  const like = `%${q.replace(/[%_]/g, '')}%`;
+  const devices = all(`${AGENT_SELECT} WHERE lower(a.hostname) LIKE ? OR lower(a.id) LIKE ? OR a.ip_addrs LIKE ? OR lower(COALESCE(a.serial,'')) LIKE ?
+                         OR lower(COALESCE(a.logged_user,'')) LIKE ? OR lower(COALESCE(a.public_ip,'')) LIKE ? OR lower(COALESCE(a.model,'')) LIKE ?
+                       ORDER BY (lower(a.hostname)=?) DESC, a.hostname COLLATE NOCASE LIMIT 12`, like, like, like, like, like, like, like, q)
+    .map((a) => { const p = presentAgent(a); return { id: p.id, hostname: p.hostname, client_name: p.client_name, platform: p.platform, online: p.online, ip: p.ip_addrs[0] || '', logged_user: p.logged_user }; });
+  return {
+    devices,
+    clients: all('SELECT id, name FROM clients WHERE lower(name) LIKE ? ORDER BY name LIMIT 6', like),
+    scripts: all('SELECT id, name, category, shell FROM scripts WHERE lower(name) LIKE ? OR lower(description) LIKE ? ORDER BY name LIMIT 8', like, like),
+    contacts: all(`SELECT ct.id, ct.name, ct.email, ct.client_id, c.name AS client_name FROM contacts ct LEFT JOIN clients c ON c.id=ct.client_id
+                   WHERE lower(ct.name) LIKE ? OR lower(COALESCE(ct.email,'')) LIKE ? ORDER BY ct.name LIMIT 6`, like, like),
+  };
+});
+
+// ---------- contacts (people at a client; a device can be assigned to one) ----------
+
+function cleanContact(b) {
+  const name = String(b.name || '').trim().slice(0, 100);
+  if (!name) throw new HttpError(400, 'Name is required');
+  const email = String(b.email || '').trim().slice(0, 200);
+  if (email && !/^[^\s@]+@[^\s@]+$/.test(email)) throw new HttpError(400, 'That email address looks wrong');
+  return { name, email, phone: String(b.phone || '').trim().slice(0, 50), title: String(b.title || '').trim().slice(0, 100), notes: String(b.notes || '').slice(0, 2000) };
+}
+route('GET', '/api/contacts', (ctx) => {
+  need(ctx);
+  const cid = ctx.query.get('client_id');
+  return all(`SELECT ct.*, c.name AS client_name, (SELECT COUNT(*) FROM agents a WHERE a.contact_id=ct.id) AS devices FROM contacts ct
+              LEFT JOIN clients c ON c.id=ct.client_id ${cid ? 'WHERE ct.client_id=?' : ''} ORDER BY ct.name COLLATE NOCASE`, ...(cid ? [Number(cid)] : []));
+});
+route('POST', '/api/contacts', (ctx) => {
+  const u = need(ctx, 'tech');
+  const v = cleanContact(ctx.body);
+  const clientId = Number(ctx.body.client_id);
+  if (!get('SELECT id FROM clients WHERE id=?', clientId)) throw new HttpError(400, 'Pick a client');
+  const r = run('INSERT INTO contacts(client_id, name, email, phone, title, notes, created_at) VALUES(?,?,?,?,?,?,?)', clientId, v.name, v.email, v.phone, v.title, v.notes, Date.now());
+  audit(u.username, 'contact.create', v.name);
+  return get('SELECT * FROM contacts WHERE id=?', r.lastInsertRowid);
+});
+route('PUT', '/api/contacts/:id', (ctx) => {
+  const u = need(ctx, 'tech');
+  const c = get('SELECT * FROM contacts WHERE id=?', Number(ctx.params.id));
+  if (!c) throw new HttpError(404, 'Contact not found');
+  const v = cleanContact({ ...c, ...ctx.body });
+  run('UPDATE contacts SET name=?, email=?, phone=?, title=?, notes=? WHERE id=?', v.name, v.email, v.phone, v.title, v.notes, c.id);
+  audit(u.username, 'contact.update', v.name);
+  return get('SELECT * FROM contacts WHERE id=?', c.id);
+});
+route('DELETE', '/api/contacts/:id', (ctx) => {
+  const u = need(ctx, 'tech');
+  const c = get('SELECT * FROM contacts WHERE id=?', Number(ctx.params.id));
+  if (!c) throw new HttpError(404, 'Contact not found');
+  run('UPDATE agents SET contact_id=NULL WHERE contact_id=?', c.id);
+  run('DELETE FROM contacts WHERE id=?', c.id);
+  audit(u.username, 'contact.delete', c.name);
+  return { ok: true };
+});
+
+// ---------- device history ----------
+
+route('GET', '/api/agents/:id/history', (ctx) => {
+  need(ctx);
+  const a = loadAgent(ctx.params.id);
+  const kinds = ctx.query.get('kinds') ? String(ctx.query.get('kinds')).split(',') : null;
+  return deviceHistory(a, { before: clampInt(ctx.query.get('before'), 0, Number.MAX_SAFE_INTEGER, Date.now() + 1), limit: 300, kinds });
+});
+
+// ---------- screenshots ----------
+
+route('POST', '/api/agents/:id/screenshot', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  if (a.platform !== 'windows') throw new HttpError(400, 'Screenshots are available on Windows devices');
+  if (!isOnline(a)) throw new HttpError(409, `${a.hostname} is offline`);
+  const s = createShot(a.id, u.username);
+  const job = await runTask(u, a, 'screenshot.take', { url: `/api/screenshot-upload/${s.id}?token=${s.token}` }, { wait: false, allowInternal: true });
+  return { id: s.id, job };
+});
+route('GET', '/api/agents/:id/screenshots', (ctx) => { need(ctx, 'tech'); return listShots(loadAgent(ctx.params.id).id); });
+route('GET', '/api/screenshots/:id/image', (ctx) => {
+  need(ctx, 'tech');
+  const s = get("SELECT * FROM screenshots WHERE id=? AND status='ready'", String(ctx.params.id));
+  if (!s || !fs.existsSync(shotFile(s))) throw new HttpError(404, 'Screenshot not found');
+  ctx.res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400',
+    ...(ctx.query.get('download') ? { 'Content-Disposition': `attachment; filename="screenshot-${new Date(s.created_at).toISOString().slice(0, 19).replace(/[T:]/g, '-')}.jpg"` } : {}) });
+  ctx.res.end(fs.readFileSync(shotFile(s)));
+});
+route('DELETE', '/api/screenshots/:id', (ctx) => {
+  const u = need(ctx, 'tech');
+  const s = get('SELECT * FROM screenshots WHERE id=?', String(ctx.params.id));
+  if (!s) throw new HttpError(404, 'Screenshot not found');
+  deleteShot(s);
+  audit(u.username, 'screenshot.delete', s.agent_id);
+  return { ok: true };
+});
+
+// ---------- role monitoring ----------
+
+route('GET', '/api/roles', (ctx) => { need(ctx); return roleDashboard(isOnline); });
+route('PUT', '/api/roles/levels', (ctx) => {
+  const u = need(ctx, 'admin');
+  const levels = savePackLevels(ctx.body.levels);
+  audit(u.username, 'roles.levels', JSON.stringify(levels));
+  return { levels };
+});
+route('POST', '/api/roles/detect', (ctx) => {
+  const u = need(ctx, 'tech');
+  const ids = Array.isArray(ctx.body.agent_ids) ? ctx.body.agent_ids.map(String) : null;
+  const agents = (ids ? ids.map((id) => get('SELECT id, hostname, platform, last_seen FROM agents WHERE id=?', id)).filter(Boolean)
+    : all('SELECT id, hostname, platform, last_seen FROM agents')).filter(isOnline);
+  const r = queueRoleDetect(agents, u.username);
+  return { created: r.created, batch_id: r.batch_id };
+});
+
+// ---------- patch manager ----------
+
+route('GET', '/api/patch/meta', (ctx) => { need(ctx); return { categories: CATEGORIES, timezone: patchTimeZone() }; });
+route('GET', '/api/patch/dashboard', (ctx) => { need(ctx); return patchDashboard(); });
+route('GET', '/api/patch/devices', (ctx) => { need(ctx); return patchDevices(); });
+route('GET', '/api/patch/approvals', (ctx) => { need(ctx); return approvalQueue(); });
+route('POST', '/api/patch/approvals', (ctx) => {
+  const u = need(ctx, 'tech');
+  if (!Array.isArray(ctx.body.keys)) throw new HttpError(400, 'Pick some updates');
+  return { changed: setApprovals(ctx.body.keys.map(String), String(ctx.body.status), u.username) };
+});
+route('GET', '/api/patch/policies', (ctx) => {
+  need(ctx);
+  return listPolicies().map((p) => ({ ...p, window: describeWindow(p),
+    devices: all('SELECT id, platform, client_id, device_class, patch_override FROM agents').filter((a) => effectivePolicy(a).policy?.id === p.id).length }));
+});
+route('POST', '/api/patch/policies', (ctx) => {
+  const u = need(ctx, 'admin');
+  const v = cleanPatchPolicy(ctx.body);
+  const pos = (get('SELECT MAX(position) AS m FROM patch_policies').m ?? -1) + 1;
+  const r = run('INSERT INTO patch_policies(name, position, enabled, target, schedule, options, reboot, approval, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    v.name, pos, v.enabled, JSON.stringify(v.target), JSON.stringify(v.schedule), JSON.stringify(v.options), JSON.stringify(v.reboot), JSON.stringify(v.approval), Date.now(), Date.now());
+  audit(u.username, 'patch.policy.create', v.name);
+  return presentPatchPolicy(get('SELECT * FROM patch_policies WHERE id=?', r.lastInsertRowid));
+});
+route('PUT', '/api/patch/policies/:id', (ctx) => {
+  const u = need(ctx, 'admin');
+  const p = get('SELECT * FROM patch_policies WHERE id=?', Number(ctx.params.id));
+  if (!p) throw new HttpError(404, 'Patch policy not found');
+  const v = cleanPatchPolicy(ctx.body);
+  run('UPDATE patch_policies SET name=?, enabled=?, target=?, schedule=?, options=?, reboot=?, approval=?, updated_at=? WHERE id=?',
+    v.name, v.enabled, JSON.stringify(v.target), JSON.stringify(v.schedule), JSON.stringify(v.options), JSON.stringify(v.reboot), JSON.stringify(v.approval), Date.now(), p.id);
+  audit(u.username, 'patch.policy.update', v.name);
+  return presentPatchPolicy(get('SELECT * FROM patch_policies WHERE id=?', p.id));
+});
+route('DELETE', '/api/patch/policies/:id', (ctx) => {
+  const u = need(ctx, 'admin');
+  const p = get('SELECT * FROM patch_policies WHERE id=?', Number(ctx.params.id));
+  if (!p) throw new HttpError(404, 'Patch policy not found');
+  run('UPDATE agents SET patch_override=NULL WHERE patch_override=?', String(p.id));
+  run('DELETE FROM patch_policies WHERE id=?', p.id);
+  audit(u.username, 'patch.policy.delete', p.name);
+  return { ok: true };
+});
+route('POST', '/api/patch/policies/order', (ctx) => {
+  const u = need(ctx, 'admin');
+  const ids = (Array.isArray(ctx.body.ids) ? ctx.body.ids : []).map(Number);
+  tx(() => ids.forEach((id, i) => run('UPDATE patch_policies SET position=? WHERE id=?', i, id)));
+  audit(u.username, 'patch.policy.order', ids.join(','));
+  return { ok: true };
+});
+route('GET', '/api/agents/:id/patch', (ctx) => {
+  need(ctx);
+  const a = loadAgent(ctx.params.id);
+  const eff = effectivePolicy(a);
+  const manual = manualApprovals();
+  return {
+    override: a.patch_override, source: eff.source, wsus: !!a.wsus,
+    policy: eff.policy ? { id: eff.policy.id, name: eff.policy.name, schedule: eff.policy.schedule, reboot: eff.policy.reboot, options: eff.policy.options, approval: eff.policy.approval, window: describeWindow(eff.policy) } : null,
+    policies: listPolicies().map((p) => ({ id: p.id, name: p.name })),
+    updates: all('SELECT uid, kb, title, severity, category, size FROM updates WHERE agent_id=? ORDER BY title', a.id)
+      .map((u) => ({ ...u, key: ukey(a.platform, u), group: categorize(u), ...approvalFor(u, a.platform, eff.policy, manual) })),
+  };
+});
+route('POST', '/api/agents/:id/patch/install-approved', async (ctx) => {
+  const u = need(ctx, 'tech');
+  const a = loadAgent(ctx.params.id);
+  const eff = effectivePolicy(a);
+  const manual = manualApprovals();
+  const ids = all('SELECT uid, kb, title, severity, category FROM updates WHERE agent_id=?', a.id)
+    .filter((x) => approvalFor(x, a.platform, eff.policy, manual).status === 'approved').map((x) => x.uid);
+  if (!ids.length) throw new HttpError(400, 'No approved updates are waiting on this device');
+  const mode = eff.policy?.reboot?.mode;
+  return runTask(u, a, 'updates.install', { ids, reboot: mode === 'auto' || mode === 'notify', reboot_delay: mode === 'notify' ? eff.policy.reboot.delay : 2, restore: !!eff.policy?.options?.restore_point }, { wait: false });
+});
+
+// ---------- executive report ----------
+
+route('GET', '/api/reports/executive', (ctx) => {
+  need(ctx);
+  const cid = ctx.query.get('client_id') ? Number(ctx.query.get('client_id')) : null;
+  const client = cid ? get('SELECT id, name FROM clients WHERE id=?', cid) : null;
+  if (cid && !client) throw new HttpError(404, 'Client not found');
+  const s = getSettings();
+  const agents = all(`${AGENT_SELECT} ${cid ? 'WHERE a.client_id=?' : ''} ORDER BY a.hostname COLLATE NOCASE`, ...(cid ? [cid] : [])).map(presentAgent);
+  const ids = new Set(agents.map((a) => a.id));
+  const inSet = (rows) => rows.filter((r) => ids.has(r.agent_id));
+  const since30 = Date.now() - 30 * 86400000;
+  const alerts30 = inSet(all('SELECT agent_id, severity, type, status FROM alerts WHERE created_at > ?', since30));
+  const openAlerts = inSet(all("SELECT agent_id, severity, message, created_at FROM alerts WHERE status IN ('open','ack')"));
+  const pd = patchDevices().filter((d) => ids.has(d.id));
+  const scanned = pd.filter((d) => d.updates_checked_at);
+  const pr = inSet(all('SELECT agent_id, status FROM policy_results'));
+  const prPass = pr.filter((r) => r.status === 'pass' || r.status === 'fixed').length, prFail = pr.filter((r) => r.status === 'fail' || r.status === 'error').length;
+  const roles = roleDashboard(isOnline).packs.map((p) => ({ ...p, devices: p.devices.filter((d) => ids.has(d.id)) })).filter((p) => p.devices.length);
+  const count = (arr, f) => arr.reduce((m, x) => { const k = f(x); m[k] = (m[k] || 0) + 1; return m; }, {});
+  return {
+    generated_at: Date.now(), client: client || null,
+    devices: {
+      total: agents.length, online: agents.filter((a) => a.online).length,
+      by_class: count(agents, (a) => a.device_class), by_platform: count(agents, (a) => a.platform),
+      stale: agents.filter((a) => !a.online && a.last_seen < Date.now() - 30 * 86400000).length,
+    },
+    alerts: { last_30_days: alerts30.length, by_severity_30: count(alerts30, (a) => a.severity), open: openAlerts.length, open_by_severity: count(openAlerts, (a) => a.severity) },
+    patching: {
+      compliance: scanned.length ? Math.round((scanned.filter((d) => d.compliant).length / scanned.length) * 100) : null,
+      scanned: scanned.length, security_pending: pd.reduce((n, d) => n + (d.security_updates || 0), 0),
+      pending: pd.reduce((n, d) => n + (d.pending_updates || 0), 0), reboot_required: pd.filter((d) => d.reboot_required).length,
+      no_policy: pd.filter((d) => !d.policy).length,
+    },
+    policies: { checks: pr.length, passed: prPass, failed: prFail, compliance: pr.length ? Math.round((prPass / pr.length) * 100) : null },
+    disks: agents.flatMap((a) => (a.disks || []).filter((d) => d.total > 0 && (d.total - d.free) / d.total * 100 >= s.disk_threshold)
+      .map((d) => ({ hostname: a.hostname, mount: d.mount, pct: Math.round(((d.total - d.free) / d.total) * 100), free: d.free }))),
+    roles: roles.map((p) => ({ id: p.id, label: p.label, devices: p.devices.length, failed: p.devices.filter((d) => d.state === 'failed').length })),
+    top_alerts: Object.entries(count(openAlerts, (a) => a.agent_id)).sort((x, y) => y[1] - x[1]).slice(0, 10)
+      .map(([id, n]) => ({ id, hostname: agents.find((a) => a.id === id)?.hostname || id, open: n })),
+    inventory: agents.map((a) => ({ hostname: a.hostname, client: a.client_name, class: a.device_class, os: a.os_name, model: [a.manufacturer, a.model].filter(Boolean).join(' '),
+      serial: a.serial, online: a.online, last_seen: a.last_seen, user: a.logged_user, contact: a.contact_name })),
+  };
 });
 
 // ---------- Android app ----------

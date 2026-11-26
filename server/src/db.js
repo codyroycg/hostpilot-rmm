@@ -136,6 +136,31 @@ addColumn('agents', 'net_ts', 'INTEGER');
 addColumn('metrics', 'net_rx', 'REAL');           // bytes/second
 addColumn('metrics', 'net_tx', 'REAL');
 
+// ---- patch manager, role monitoring, contacts, device history, screenshots, user preferences ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS patch_policies(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, position INTEGER DEFAULT 0, enabled INTEGER DEFAULT 1,
+  target TEXT, schedule TEXT, options TEXT, reboot TEXT, approval TEXT, created_at INTEGER, updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS patch_approvals(
+  ukey TEXT PRIMARY KEY, status TEXT NOT NULL, title TEXT, decided_by TEXT, decided_at INTEGER);
+CREATE TABLE IF NOT EXISTS contacts(
+  id INTEGER PRIMARY KEY, client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL,
+  email TEXT, phone TEXT, title TEXT, notes TEXT, created_at INTEGER);
+CREATE TABLE IF NOT EXISTS device_events(
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, ts INTEGER, kind TEXT, text TEXT);
+CREATE INDEX IF NOT EXISTS device_events_idx ON device_events(agent_id, ts);
+CREATE TABLE IF NOT EXISTS screenshots(
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, created_at INTEGER,
+  created_by TEXT, size INTEGER, token TEXT, status TEXT DEFAULT 'pending');
+`);
+addColumn('agents', 'patch_override', 'TEXT');   // null = follow patch policies, 'none' = never patch, '<id>' = that policy
+addColumn('agents', 'patch_window', 'TEXT');     // key of the last maintenance window that was handled
+addColumn('agents', 'wsus', 'INTEGER');          // Windows Update points at a WSUS server (HostPilot can't patch then)
+addColumn('agents', 'roles', 'TEXT');            // JSON [{id, services:[...]}] detected server roles
+addColumn('agents', 'roles_at', 'INTEGER');
+addColumn('agents', 'contact_id', 'INTEGER');
+addColumn('users', 'prefs', 'TEXT');             // JSON: favorites, device list columns, theme, show IDs
+
 const stmtCache = new Map();
 function stmt(sql) {
   let s = stmtCache.get(sql);
@@ -169,6 +194,9 @@ export const SETTING_DEFAULTS = {
   watch_services_windows: '', // services monitored on every Windows device (comma separated)
   watch_services_linux: '',
   watch_services_macos: '',
+  role_packs: '',      // JSON {packId: 'off'|'low'|'high'} for role monitoring (missing = 'high')
+  role_scan_hours: 24, // how often server roles are detected
+  patch_timezone: '',  // IANA zone for patch windows (empty = the server's zone)
 };
 
 export function getSettings() {

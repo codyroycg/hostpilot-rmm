@@ -2,6 +2,13 @@
 // online HostPilot device on that subnet (the "relay"). The server also sends one itself, which only
 // helps when the container shares that network (e.g. network_mode: host).
 import dgram from 'node:dgram';
+import { all, audit } from './db.js';
+import { HttpError } from './util.js';
+import { queueJobs, isPolling } from './jobs.js';
+import { buildTask, supportsTask } from './task-catalog.js';
+
+const ONLINE_WINDOW = 3 * 60 * 1000;
+const isOnline = (a) => isPolling(a.id) || (a.last_seen && Date.now() - a.last_seen < ONLINE_WINDOW);
 
 /** "AA-BB-CC-DD-EE-FF" / "aabb.ccdd.eeff" → "aa:bb:cc:dd:ee:ff"; null for anything that can't be a NIC. */
 export function normMac(m) {
@@ -43,6 +50,54 @@ export const slash24 = (ip) => `${String(ip).split('.').slice(0, 3).join('.')}.0
 export function magicPacket(mac) {
   const m = Buffer.from(mac.replace(/:/g, ''), 'hex');
   return Buffer.concat([Buffer.alloc(6, 0xff), ...Array(16).fill(m)]);
+}
+
+/** MAC addresses (wired first, no VPN/virtual) and private IPv4 addresses HostPilot knows for an agent row. */
+export function agentWakeTarget(a) {
+  const ifaces = a.net_ifaces ? JSON.parse(a.net_ifaces) : [];
+  const physical = ifaces.filter((i) => !['vpn', 'virtual', 'bluetooth', 'cellular'].includes(i.kind));
+  physical.sort((x, y) => (y.kind === 'ethernet') - (x.kind === 'ethernet')); // most machines only wake from Ethernet
+  const macs = [...new Set(physical.map((i) => normMac(i.mac)).filter(Boolean))].slice(0, 8);
+  for (const d of all('SELECT mac FROM net_devices WHERE agent_id=? AND mac IS NOT NULL', a.id)) { // seen by network discovery
+    const m = normMac(d.mac);
+    if (m && !macs.includes(m)) macs.push(m);
+  }
+  const ips = [...new Set([...(a.ip_addrs ? JSON.parse(a.ip_addrs) : []), ...physical.flatMap((i) => i.ips || [])])].filter(isPrivateV4);
+  return { macs, ips };
+}
+
+/**
+ * Sends magic packets for `macs` from an online HostPilot device on the same subnet as `ips`
+ * (preferring `prefer`, then devices of the same client), plus a best-effort broadcast from the server.
+ */
+export async function wakeOnLan({ macs, ips, subnets = [], prefer = null, clientId = null, exclude = null, label, user }) {
+  const nets = [...subnets];
+  for (const n of all('SELECT subnet FROM networks')) if (ips.some((ip) => ipInCidr(ip, n.subnet))) nets.push(n.subnet);
+  for (const ip of ips) nets.push(slash24(ip));
+  const uniqNets = [...new Set(nets.filter((n) => broadcastFor(n)))];
+  if (!uniqNets.length) throw new HttpError(400, `HostPilot doesn't know which network ${label} is on (no private IPv4 address recorded).`);
+
+  const candidates = all('SELECT id, hostname, platform, client_id, ip_addrs, last_seen FROM agents WHERE id IS NOT ?', exclude)
+    .filter((r) => isOnline(r) && supportsTask('net.wake', r.platform))
+    .map((r) => ({ ...r, ips: r.ip_addrs ? JSON.parse(r.ip_addrs) : [] }));
+  let relay = null, subnet = uniqNets[0];
+  for (const n of uniqNets) {
+    const onNet = candidates.filter((r) => r.ips.some((ip) => ipInCidr(ip, n)))
+      .sort((x, y) => (y.id === prefer) - (x.id === prefer) || (y.client_id === clientId) - (x.client_id === clientId));
+    if (onNet.length) { relay = onNet[0]; subnet = n; break; }
+  }
+  const bcasts = [...new Set([broadcastFor(subnet), ...ips.filter((ip) => ipInCidr(ip, subnet)), '255.255.255.255'])];
+  let job = null;
+  if (relay) {
+    const r = queueJobs({
+      agents: [relay], name: `Wake-on-LAN ${label}`, task: 'net.wake', createdBy: user.username, timeout: 60,
+      build: (a) => buildTask('net.wake', a.platform, { macs: macs.join(','), bcasts: bcasts.join(','), label }, { allowInternal: true }),
+    });
+    job = r.jobs[0] || null;
+  }
+  const serverSent = await sendFromServer(macs, [broadcastFor(subnet), '255.255.255.255']);
+  audit(user.username, 'wake-on-lan', `${label} (${macs.join(', ')}) via ${relay ? relay.hostname : 'server only'}`);
+  return { macs, subnet, relay: relay ? { id: relay.id, hostname: relay.hostname } : null, job, server_sent: serverSent };
 }
 
 /** Best-effort broadcast from the server itself. Resolves to the number of packets sent. */

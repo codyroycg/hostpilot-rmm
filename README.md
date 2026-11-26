@@ -26,7 +26,41 @@ Manual removal: `sudo launchctl bootout system/com.hostpilot.agent; sudo rm -rf 
 - **Remote control (Windows)**: view and control the screen in a browser tab, with no app to install on either side. It follows UAC prompts and the login screen, sends only changed regions, and has quality presets, special-key combos (Win, Alt+Tab, Ctrl+Shift+Esc…) and "type text" for pasting passwords.
 - **Linux terminal**: a full interactive root shell in the browser (xterm.js), so `top`, `vim`, `htop` and tab completion work. It needs only bash, curl, and util-linux `script` on the server.
 - **File browser**: browse drives and folders, then upload (drag & drop), download (folders come as .zip / .tar.gz), rename, delete, or create folders.
-- **OS patching**: scan for updates with Windows Update or apt/dnf/yum/zypper, then install all or selected updates with optional automatic reboot. The fleet **Patching** page shows pending, security, and reboot-required counts. Devices are scanned automatically every 24 h.
+- **OS patching**: scan for updates with Windows Update or apt/dnf/yum/zypper, then install all or selected updates with optional automatic reboot. Devices are scanned automatically every 24 h.
+- **Patch manager**: has a **Dashboard**, **Devices**, **Approvals** and **Policies**.
+  - **Dashboard**: compliance score, devices patching now, no patch inventory, reboot needed, WSUS in use, no policy, and updates awaiting approval.
+  - **Patch policies**: an ordered list where the first match wins. Each targets a platform, device types, clients or specific devices.
+  - **Maintenance window**: days, start time and length. Options:
+    - Wake-on-LAN 10 minutes before the window.
+    - A Windows restore point before installing.
+    - Catch-up ("daytime") patching for devices that were off, once they've been up for N minutes.
+  - **Reboot**: never, automatic, or "warn the user, then reboot after N minutes".
+  - **Approvals**: automatic approve or deny per update type (security, critical, definition, driver, feature, other). Everything else waits on the **Approvals** list. A manual approve or deny there applies fleet-wide and always wins.
+  - **Per-device override** (device → Updates): "never patch" or "always use policy X". The tab also shows the effective policy and each update's approval, and offers **Install approved now**.
+  - **Time zone**: set it under Settings.
+- **Role monitoring**: HostPilot detects server roles daily from enabled services (Windows: `Get-Service`/SMB shares/shared printers; Linux: systemd).
+  - **Roles detected**: domain controller, DNS, DHCP, file and print server, Hyper-V, KVM, Docker, SQL Server, MySQL/MariaDB, PostgreSQL, Exchange, mail server, IIS, web server, and Veeam backup.
+  - **Monitoring**: each role's services are monitored continuously.
+  - **Dashboard**: grouped by category (Core services, Virtualization, Databases, Messaging, Web, Backup) with healthy or failing services per device.
+  - **Alert level** per role: Off, Low (warning alerts) or High (critical alerts).
+- **Console conveniences**:
+  - **Favorites**: ☆ next to any page title pins it to the top of the menu.
+  - **Search palette** (Ctrl+K or the search box): devices by name, ID, IP, serial or user; clients, scripts, contacts and pages. Searching a script on a device page runs it there.
+  - **+ New menu**: client, contact, script, policy, patch policy or network.
+  - **Bell**: notifies you when commands and scripts you started finish.
+  - **Preferences**: light, dark or auto theme, show object IDs, and the Devices-list **column chooser** (show, hide, reorder; 20+ columns). The Devices search matches every field.
+  - All of these are saved per user.
+- **Contacts**: people per client (name, email, phone, title). Assign one to each device; they show on the device, in search and in reports.
+- **Device history**: one timeline per device covering start-ups, sign-ins, software installs, updates and removals, OS/agent/IP changes, roles, patch windows, commands and scripts, alerts, chat and technician actions.
+- **Screenshots** (Windows): take a background screenshot of the console session from the device's **Screenshots** tab and browse or download past ones. The newest 50 per device are kept.
+- **Executive report**: a printable (or PDF) health report for one client or all clients, covering:
+  - devices online
+  - patch and policy compliance
+  - alerts
+  - server roles
+  - full disks
+  - the noisiest devices
+  - a full inventory with users and contacts
 - **Software management**: uninstall or reinstall installed programs, and install new software with **winget** (Windows) or the package manager (Linux), on one device or in bulk.
 - **Hardware**: network interfaces (make, model, name, connected or not, VPN), disk make, model, serial, firmware and SMART health (temperature, power-on hours, life used, errors; Linux needs `smartmontools`), every USB device that is or ever was connected (Windows device history / Linux kernel log), and printers & scanners with their connection state.- **Background tools (no interruption for the user)**: interactive **PowerShell** and **Command Prompt** sessions on Windows (hidden, as SYSTEM) and a root terminal on Linux; **Task manager** (processes with live CPU/memory, end process or process tree; services with start/stop/restart and startup type); **Registry editor** (browse, create, edit and delete keys and values); file transfers in the Files tab.
 - **Policies (configuration baselines)**: target device groups (clients, desktops/laptops/servers/VMs, platform, or a hand-picked list) with rules such as firewall on, Defender real-time protection, signatures current, BitLocker, SMBv1 off, guest disabled, password/lockout policy, screen lock, RDP/NLA, UAC, AutoRun, Windows Update, SSH hardening, automatic updates (Linux), service running/disabled, registry values, approved local admins and custom scripts. Report only, or **Enforce** to auto-fix drift. Compliance matrix per policy and per device.

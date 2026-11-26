@@ -5,7 +5,27 @@ const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-const state = { user: null, timers: [], selected: new Set(), terminal: new Map(), devFilter: { q: '', client: '', status: '', platform: '' }, scripts: null };
+const state = { user: null, timers: [], selected: new Set(), terminal: new Map(), devFilter: { q: '', client: '', status: '', platform: '' }, scripts: null,
+  prefs: { favorites: [], columns: null, theme: 'auto', show_ids: false } };
+
+/** Theme from Preferences (remembered locally too, so the page doesn't flash the wrong theme while loading). */
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  try { localStorage.setItem('hp-theme', theme || 'auto'); } catch { /* storage blocked */ }
+}
+try { applyTheme(localStorage.getItem('hp-theme') || 'auto'); } catch { /* storage blocked */ }
+
+async function loadPrefs() {
+  try { state.prefs = await api('GET', '/api/me/prefs'); } catch { /* keep defaults */ }
+  applyTheme(state.prefs.theme);
+  document.body.classList.toggle('show-ids', !!state.prefs.show_ids);
+}
+async function savePrefs(patch) {
+  state.prefs = await api('PUT', '/api/me/prefs', patch);
+  applyTheme(state.prefs.theme);
+  document.body.classList.toggle('show-ids', !!state.prefs.show_ids);
+}
 
 class ApiError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 
@@ -167,28 +187,37 @@ function chart(rows, series, { hours = 24, rate = false } = {}) {
 
 // ---------------- layout & routing ----------------
 const NAV = [
-  ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/alerts', 'Alerts', 'alerts'], ['#/messages', 'Messages', 'chat'],
-  null, ['#/patching', 'Patching'], ['#/policies', 'Policies'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
-  null, ['#/settings', 'Settings'],
+  ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/contacts', 'Contacts'], ['#/alerts', 'Alerts', 'alerts'], ['#/messages', 'Messages', 'chat'],
+  null, ['#/patching', 'Patch manager'], ['#/roles', 'Role monitoring'], ['#/policies', 'Policies'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
+  null, ['#/reports', 'Reports'], ['#/settings', 'Settings'],
 ];
 
 function renderShell() {
   $('#root').innerHTML = `<div class="app">
     <aside class="sidebar" id="sidebar">
       <div class="brand"><img src="/favicon.svg" alt="">HostPilot RMM</div>
+      <div id="nav-fav"></div>
       <nav class="nav">${NAV.map((n) => (n ? `<a href="${n[0]}" data-nav="${n[0]}">${n[1]}${n[2] ? `<span class="badge hidden" id="nav-${n[2]}"></span>` : ''}</a>` : '<div class="sep"></div>')).join('')}
         ${window.HostPilotApp ? '<a href="#" data-action="app-settings">Phone app settings</a>' : ''}</nav>
     </aside>
     <div class="sidebar-scrim" data-action="toggle-menu"></div>
     <div class="main">
       <header class="topbar">
-        <div class="row"><button class="btn sm menu-toggle" data-action="toggle-menu">☰</button><strong id="page-title"></strong></div>
-        <div class="user"><span>${esc(state.user.username)} · ${esc(state.user.role)}</span><button class="btn sm" data-action="logout">Sign out</button></div>
+        <div class="row" style="min-width:0;flex-wrap:nowrap"><button class="btn sm menu-toggle" data-action="toggle-menu">☰</button><strong id="page-title"></strong>
+          <button class="fav-star" id="fav-star" data-action="toggle-fav" title="Add this page to Favorites" aria-label="Favorite">☆</button></div>
+        <div class="top-tools">
+          <button class="btn sm search-btn" data-action="palette" title="Search devices, clients, scripts, pages (Ctrl+K)"><span aria-hidden="true">⌕</span><span class="search-label">Search or jump to…</span><kbd>Ctrl K</kbd></button>
+          ${can('tech') ? '<button class="btn sm" data-action="new-menu" title="Create something new">+ New</button>' : ''}
+          <button class="btn sm bell" data-action="bell" title="Notifications: your commands and scripts"><span aria-hidden="true">🔔</span><span class="badge bad hidden" id="bell-n"></span></button>
+          <button class="btn sm" data-action="user-menu" title="Preferences and sign out">${esc(state.user.username)} <span class="muted small hide-sm">· ${esc(state.user.role)}</span> ▾</button>
+        </div>
       </header>
       <main id="view"></main>
     </div></div>`;
+  renderFavs();
   updateAlertBadge();
   setInterval(guard(updateAlertBadge), 30000);
+  startBell();
   // inside the Android app: let it register this phone for alert / chat notifications
   try { window.HostPilotApp?.signedIn(state.user.username); } catch { /* older app */ }
 }
@@ -211,7 +240,10 @@ const ROUTES = [
   [/^#\/scripts$/, pageScripts, 'Scripts'],
   [/^#\/scripts\/(new|\d+)$/, pageScriptEdit, 'Script'],
   [/^#\/automation$/, pageAutomation, 'Automation'],
-  [/^#\/patching$/, pagePatching, 'Patching'],
+  [/^#\/patching(?:\/(\w+))?(?:\/(\w+))?$/, pagePatching, 'Patch manager'],
+  [/^#\/roles$/, pageRoles, 'Role monitoring'],
+  [/^#\/reports$/, pageReports, 'Reports'],
+  [/^#\/contacts$/, pageContacts, 'Contacts'],
   [/^#\/jobs$/, pageJobs, 'Job history'],
   [/^#\/jobs\/batch\/([\w-]+)$/, pageBatch, 'Job results'],
   [/^#\/alerts$/, pageAlerts, 'Alerts'],
@@ -245,6 +277,7 @@ async function router() {
   state.pageAbort = new AbortController();
   view.innerHTML = '<div class="muted">Loading…</div>';
   const nav = state.pageAbort;
+  syncFavStar();
   try { await r[1](view, ...hash.match(r[0]).slice(1)); }
   catch (e) {
     // a page that was left while it was still loading must not paint its error over the page now shown
@@ -267,6 +300,7 @@ function renderLogin() {
     const f = new FormData(e.target);
     try {
       state.user = await api('POST', '/api/login', { username: f.get('username'), password: f.get('password') });
+      await loadPrefs();
       renderShell(); router();
     } catch (err) { $('#login-err').textContent = err.message; }
   });
@@ -1052,7 +1086,7 @@ async function pagePolicies(view) {
   view.innerHTML = `<div class="page-head"><h1>Policies</h1>${can('admin') ? '<a class="btn primary" href="#/policies/new">+ New policy</a>' : ''}</div>
     <p class="small muted" style="margin-top:-8px">Configuration baselines and security policies. Each policy targets a group of devices (by client, device type, platform, or a hand-picked list) and checks its rules on a schedule. With <strong>Enforce</strong> on, settings that drift are fixed automatically.</p>
     ${pols.length ? `<div class="grid cols-2">${pols.map((p) => { const c = p.compliance; const pc = c.checked ? Math.round((c.compliant / c.checked) * 100) : null; return `<a class="card netcard" href="#/policies/${p.id}">
-      <div class="row" style="justify-content:space-between"><strong>${esc(p.name)}</strong><span>${p.enforce ? badge('enforce', 'info') : badge('report only')}${p.enabled ? '' : ` ${badge('disabled', 'warn')}`}</span></div>
+      <div class="row" style="justify-content:space-between"><strong>${esc(p.name)} <span class="obj-id">#${p.id}</span></strong><span>${p.enforce ? badge('enforce', 'info') : badge('report only')}${p.enabled ? '' : ` ${badge('disabled', 'warn')}`}</span></div>
       <div class="small muted">${esc(targetSummary(p.target, clients))} · ${plural(p.rules.length, 'rule')} · every ${p.interval_hours} h</div>
       <div>${pc == null ? '<span class="small muted">Not checked yet</span>' : `<div class="meter"><div class="bar ${pc < 70 ? 'bad' : pc < 100 ? 'warn' : ''}"><span style="width:${pc}%"></span></div><span class="n">${pc}%</span></div>`}</div>
       <div class="small">${badge(`${c.compliant} compliant`, 'ok')} ${c.non_compliant ? badge(`${c.non_compliant} not compliant`, 'bad') : ''} ${c.not_checked ? badge(`${c.not_checked} not checked`) : ''}${c.fixed ? ` ${badge(`${c.fixed} auto-fixed`, 'info')}` : ''}</div></a>`; }).join('')}</div>`
@@ -1186,6 +1220,7 @@ setInterval(() => { if (state.user && can('tech')) updateChatBadge(); }, 15000);
 async function pageDevices(view) {
   const clients = await api('GET', '/api/clients');
   const f = state.devFilter;
+  const cols = deviceColumns();
   view.innerHTML = `
     <div class="page-head"><h1>Devices</h1>
       <div class="row">
@@ -1196,16 +1231,17 @@ async function pageDevices(view) {
           <button class="btn primary" data-action="run-selected" id="run-sel" disabled>Run script on selected</button>` : ''}
         <a class="btn" href="#/clients">+ Add devices</a></div></div>
     <div class="toolbar">
-      <input type="search" id="dev-q" placeholder="Search hostname, IP, user, OS…" value="${esc(f.q)}">
+      <input type="search" id="dev-q" placeholder="Search any field: name, IP, user, serial, model, online…" value="${esc(f.q)}">
       <select id="dev-client"><option value="">All clients</option>${clients.map((c) => `<option value="${c.id}" ${String(f.client) === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
       <select id="dev-status"><option value="">Any status</option><option value="online">Online</option><option value="offline">Offline</option><option value="alerts">With alerts</option><option value="maintenance">Maintenance</option></select>
       <select id="dev-platform"><option value="">All platforms</option><option value="windows">Windows</option><option value="linux">Linux</option><option value="macos">macOS</option></select>
       <select id="dev-class"><option value="">All device types</option><option value="desktop">Desktops</option><option value="laptop">Laptops</option><option value="server">Servers</option><option value="vm">Virtual machines</option></select>
-      <span class="muted small" id="dev-count"></span>
+      <span class="muted small" id="dev-count"></span><span class="grow"></span>
+      <button class="btn sm" data-action="dev-columns" title="Show, hide and reorder columns">☷ Columns</button>
     </div>
     <div class="card flush"><div class="table-wrap"><table>
-      <thead><tr><th style="width:32px"><input type="checkbox" id="dev-all"></th><th>Hostname</th><th>Client</th><th>Type</th><th>OS</th><th>IP</th><th>User</th><th>CPU</th><th>RAM</th><th>Disk</th><th>Last seen</th></tr></thead>
-      <tbody id="dev-body"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody></table></div></div>`;
+      <thead><tr><th style="width:32px"><input type="checkbox" id="dev-all"></th><th>Hostname</th>${cols.map((c) => `<th>${esc(c.label)}</th>`).join('')}</tr></thead>
+      <tbody id="dev-body"><tr><td colspan="${cols.length + 2}" class="empty">Loading…</td></tr></tbody></table></div></div>`;
   $('#dev-status').value = f.status;
   $('#dev-platform').value = f.platform;
   $('#dev-class').value = f.cls || '';
@@ -1220,7 +1256,11 @@ async function pageDevices(view) {
       if (f.status === 'offline' && a.online) return false;
       if (f.status === 'alerts' && !a.open_alerts) return false;
       if (f.status === 'maintenance' && !a.maintenance) return false;
-      if (q && ![a.hostname, a.os_name, a.logged_user, a.client_name, a.public_ip, ...(a.ip_addrs || [])].join(' ').toLowerCase().includes(q)) return false;
+      // every field (shown or not) is searchable, plus words like "online", "offline", "maintenance", "alerts"
+      if (q) {
+        const hay = [a.hostname, a.id, ...DEV_COLS.map((c) => c.text(a)), a.maintenance ? 'maintenance' : '', a.open_alerts ? 'alerts' : ''].join(' ').toLowerCase();
+        if (!q.split(/\s+/).every((w) => hay.includes(w))) return false;
+      }
       return true;
     });
   };
@@ -1230,11 +1270,8 @@ async function pageDevices(view) {
     $('#dev-body').innerHTML = list.map((a) => `<tr class="clickable" data-href="#/devices/${a.id}">
       <td data-stop><input type="checkbox" class="dev-cb" value="${a.id}" ${state.selected.has(a.id) ? 'checked' : ''}></td>
       <td class="nowrap">${statusDot(a)}<strong>${esc(a.hostname)}</strong>${a.open_alerts ? ` ${badge(a.open_alerts + ' alert' + (a.open_alerts > 1 ? 's' : ''), 'bad')}` : ''}</td>
-      <td>${esc(a.client_name || '—')}</td><td>${classBadge(a.device_class)}</td><td>${osCell(a)}</td>
-      <td class="mono small">${esc((a.ip_addrs || [])[0] || '')}</td><td class="small">${esc(a.logged_user || '')}</td>
-      <td>${a.online ? meter(a.cpu_pct) : '<span class="muted">—</span>'}</td><td>${a.online ? meter(a.mem_pct) : '<span class="muted">—</span>'}</td><td>${meter(a.disk_pct)}</td>
-      <td class="nowrap small ${a.online ? '' : 'muted'}">${a.online ? 'Online' : fmtAgo(a.last_seen)}</td></tr>`).join('')
-      || `<tr><td colspan="11" class="empty">${agents.length ? 'No devices match the filters' : 'No devices yet. Go to a client page to get an install command.'}</td></tr>`;
+      ${cols.map((c) => `<td>${c.cell(a)}</td>`).join('')}</tr>`).join('')
+      || `<tr><td colspan="${cols.length + 2}" class="empty">${agents.length ? 'No devices match the filters' : 'No devices yet. Go to a client page to get an install command.'}</td></tr>`;
     syncSel();
   };
   const syncSel = () => {
@@ -1293,11 +1330,11 @@ async function pageDevice(view, id, tab = 'overview') {
   const win = a.platform === 'windows';
   const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['tasks', 'Task manager'], ...(win ? [['registry', 'Registry']] : []),
     ['updates', 'Updates'], ['software', 'Software'], ['users', 'Users'], ['hardware', 'Hardware'], ['firewall', 'Firewall'], ['compliance', 'Compliance'],
-    ...(win || a.platform === 'linux' ? [['chat', 'Chat']] : []), ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+    ...(win || a.platform === 'linux' ? [['chat', 'Chat']] : []), ...(win ? [['screenshots', 'Screenshots']] : []), ['history', 'History'], ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
   const term = (shell, label) => `<a class="btn" href="/terminal.html#${encodeURIComponent(a.id)}${shell ? `/${shell}` : ''}" target="_blank" rel="noopener" title="Opens a background session as SYSTEM/root; the signed-in user sees nothing">${label}</a>`;
   view.innerHTML = `
     <div class="page-head"><div>
-      <h1>${statusDot(a)}${esc(a.hostname)}</h1>
+      <h1>${statusDot(a)}${esc(a.hostname)} <span class="obj-id">${esc(a.id)}</span></h1>
       <div class="muted small" style="margin-top:4px">${osCell(a)} · ${classBadge(a.device_class)} · ${a.client_name ? `<a href="#/clients/${a.client_id}">${esc(a.client_name)}</a>` : 'No client'} · ${a.maintenance ? badge('maintenance', 'warn') : a.online ? badge('online', 'ok') : badge(`offline · ${fmtAgo(a.last_seen)}`, 'bad')}</div></div>
       <div class="row">${can('tech') && win ? `<a class="btn primary" href="/remote.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Remote control</a>${term('powershell', 'PowerShell')}${term('cmd', 'Command Prompt')}` : ''}
       ${can('tech') && !win ? `<a class="btn primary" href="/terminal.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Terminal</a>` : ''}
@@ -1309,7 +1346,7 @@ async function pageDevice(view, id, tab = 'overview') {
   const fn = {
     overview: devOverview, terminal: devTerminal, files: devFiles, updates: devUpdates, software: devSoftware, users: devUsers,
     hardware: devHardware, firewall: devFirewall, tasks: devTaskManager, registry: devRegistry, compliance: devCompliance, chat: devChat,
-    jobs: devJobs, alerts: devAlerts, settings: devSettings,
+    jobs: devJobs, alerts: devAlerts, settings: devSettings, history: devHistory, screenshots: devScreenshots,
   }[tab] || devOverview;
   await fn(el, a);
 }
@@ -1342,6 +1379,7 @@ async function devOverview(el, a) {
     <div class="card"><h3>Monitored services</h3>${(a.services || []).length ? `<table class="dash"><tbody>${a.services.map((s) => `<tr><td><strong>${esc(s.display || s.name)}</strong>${s.display ? `<div class="small muted mono">${esc(s.name)}</div>` : ''}</td>
         <td class="small muted">${esc(s.start)}</td><td class="right">${s.status === 'running' ? badge('running', 'ok') : s.status === 'missing' ? badge('not installed', 'warn') : badge(s.status, 'bad')}</td></tr>`).join('')}</tbody></table>`
       : '<div class="small muted">No services are monitored on this device. Add them in Settings (all devices), on this device\'s Settings tab, or with a "Service running" policy rule. You get an alert when a monitored service stops.</div>'}</div>
+    <div class="card" id="ov-assign"><h3>Contact, roles & patching</h3><div class="muted small">Loading…</div></div>
     ${chartCard('perf', 'Performance')}
     ${chartCard('net', 'Network traffic')}
     ${a.notes ? `<div class="card"><h3>Notes</h3><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>` : ''}
@@ -1349,7 +1387,7 @@ async function devOverview(el, a) {
   const perf = chartPanel(a, 'perf', [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']]);
   const net = chartPanel(a, 'net', [['net_rx', 'Download', 'var(--c4)'], ['net_tx', 'Upload', 'var(--c5)']], { rate: true });
   liveUtilization(a);
-  await Promise.all([perf(), net()]);
+  await Promise.all([perf(), net(), devAssignCard(a).catch(() => {})]);
 }
 
 /** Keeps the overview's CPU / per-core / memory meters current with the device's 2-second live sampler. */
@@ -1794,28 +1832,50 @@ async function devUpdates(el, a) {
   const sel = new Set();
   let reboot = false;
   let busy = false;
+  let updKeys = new Map(); // uid -> fleet-wide approval key
   const draw = async () => {
-    const d = await api('GET', `/api/agents/${a.id}/updates`);
+    const [d, patch] = await Promise.all([api('GET', `/api/agents/${a.id}/updates`), api('GET', `/api/agents/${a.id}/patch`)]);
     busy = !!d.running;
     const sec = (u) => /critical|important|security/i.test(`${u.severity} ${u.category}`);
     const ids = new Set(d.updates.map((u) => u.uid));
     for (const id of [...sel]) if (!ids.has(id)) sel.delete(id);
-    el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="row" style="justify-content:space-between">
+    const appr = new Map(patch.updates.map((u) => [u.uid, u]));
+    const nApproved = patch.updates.filter((u) => u.status === 'approved').length;
+    const p = patch.policy;
+    el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;align-items:flex-start"><div>
+        <strong>Patch policy:</strong> ${p ? `<a href="#/patching/policies/${p.id}">${esc(p.name)}</a>${patch.source === 'override' ? ` ${badge('override for this device', 'warn')}` : ''}
+          <div class="small muted">${esc(windowText(p))} · ${esc(REBOOT_TEXT[p.reboot.mode])} · ${p.window.open ? `window open until ${esc(p.window.open_until)}` : `next window ${esc(p.window.next_start || '—')}`}</div>`
+    : patch.source === 'override-none' ? `${badge('patching disabled on this device', 'warn')}` : '<span class="muted">none</span> <span class="small muted">(no patch policy targets this device)</span>'}
+        ${patch.wsus ? `<div class="small" style="color:var(--warn)">⚠ Windows Update on this device points at a WSUS server, so it may not see every update.</div>` : ''}</div>
+        ${can('tech') ? `<div class="row"><label class="small muted" for="u-override">Override</label><select id="u-override" style="width:auto">
+          <option value="">Follow patch policies</option><option value="none" ${patch.override === 'none' ? 'selected' : ''}>Never patch this device</option>
+          ${patch.policies.map((x) => `<option value="${x.id}" ${String(patch.override) === String(x.id) ? 'selected' : ''}>Always use: ${esc(x.name)}</option>`).join('')}</select>
+          <button class="btn" data-u="approved-now" ${busy || !nApproved ? 'disabled' : ''} title="Install the approved updates now instead of waiting for the window">Install ${nApproved} approved now</button></div>` : ''}
+      </div></div>
+      <div class="card" style="margin-bottom:16px"><div class="row" style="justify-content:space-between">
         <div><strong>${d.checked_at ? `${d.updates.length} pending update${d.updates.length === 1 ? '' : 's'}` : 'Not scanned yet'}</strong>
           ${d.updates.filter(sec).length ? badge(`${d.updates.filter(sec).length} security`, 'bad') : ''} ${d.reboot_required ? badge('reboot required', 'warn') : ''}
           <div class="small muted">${d.checked_at ? `Last scanned ${fmtAgo(d.checked_at)}` : ''}${busy ? ` · ${d.running.task === 'updates.install' ? 'Installing updates' : 'Scanning'} (${d.running.status})…` : ''}
           · ${a.platform === 'windows' ? 'Windows Update' : 'system package manager'}</div></div>
         ${can('tech') ? `<div class="row"><label class="check small" style="margin:0"><input type="checkbox" id="u-reboot" ${reboot ? 'checked' : ''}> Reboot if required</label>
           <button class="btn" data-u="scan" ${busy ? 'disabled' : ''}>Scan now</button>
+          <button class="btn" data-u="approve" ${!sel.size ? 'disabled' : ''} title="Approve for every device">Approve (${sel.size})</button>
+          <button class="btn" data-u="deny" ${!sel.size ? 'disabled' : ''} title="Deny for every device">Deny</button>
           <button class="btn" data-u="selected" ${busy || !sel.size ? 'disabled' : ''}>Install selected (${sel.size})</button>
           <button class="btn primary" data-u="all" ${busy || !d.updates.length ? 'disabled' : ''}>Install all</button></div>` : ''}
       </div></div>
       <div class="card flush"><div class="table-wrap"><table>
-        <thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="u-all"></th>' : ''}<th>Update</th><th>Severity</th><th>Category / repo</th></tr></thead>
+        <thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="u-all"></th>' : ''}<th>Update</th><th>Severity</th><th>Category / repo</th><th>Approval</th></tr></thead>
         <tbody>${d.updates.map((u) => `<tr>${can('tech') ? `<td><input type="checkbox" data-uid="${esc(u.uid)}" ${sel.has(u.uid) ? 'checked' : ''}></td>` : ''}
           <td>${esc(u.title)}${u.kb ? ` <span class="small muted mono">${esc(u.kb)}</span>` : ''}</td>
-          <td>${u.severity ? badge(u.severity, sec(u) ? 'bad' : 'info') : (sec(u) ? badge('security', 'bad') : '')}</td><td class="small">${esc(u.category)}</td></tr>`).join('')
-          || `<tr><td colspan="4" class="empty">${d.checked_at ? 'Up to date 🎉' : 'Click "Scan now" to check for updates.'}</td></tr>`}</tbody></table></div></div>`;
+          <td>${u.severity ? badge(u.severity, sec(u) ? 'bad' : 'info') : (sec(u) ? badge('security', 'bad') : '')}</td><td class="small">${esc(u.category)}</td>
+          <td class="nowrap">${appr.has(u.uid) ? approvalBadge(appr.get(u.uid).status, appr.get(u.uid).by) : ''}</td></tr>`).join('')
+          || `<tr><td colspan="5" class="empty">${d.checked_at ? 'Up to date 🎉' : 'Click "Scan now" to check for updates.'}</td></tr>`}</tbody></table></div></div>`;
+    $('#u-override', el)?.addEventListener('change', guard(async (e) => {
+      await api('PUT', `/api/agents/${a.id}`, { patch_override: e.target.value || null });
+      toast('Patch override saved'); await draw();
+    }));
+    updKeys = new Map(patch.updates.map((u) => [u.uid, u.key]));
   };
   el.addEventListener('change', (e) => {
     if (e.target.id === 'u-reboot') reboot = e.target.checked;
@@ -1826,6 +1886,17 @@ async function devUpdates(el, a) {
     const b = e.target.closest('[data-u]');
     if (!b) return;
     const op = b.dataset.u;
+    if (op === 'approve' || op === 'deny') {
+      const keys = [...sel].map((uid) => updKeys.get(uid)).filter(Boolean);
+      const r = await api('POST', '/api/patch/approvals', { keys, status: op === 'approve' ? 'approved' : 'denied' });
+      toast(`${r.changed} update(s) ${op === 'approve' ? 'approved' : 'denied'} for every device`);
+      sel.clear(); await draw(); return;
+    }
+    if (op === 'approved-now') {
+      if (!await confirmDialog(`Install the approved updates on ${a.hostname} now, using its patch policy's reboot setting?`, { okLabel: 'Install' })) return;
+      await api('POST', `/api/agents/${a.id}/patch/install-approved`);
+      toast('Installation started. Progress is in Script history.'); await draw(); return;
+    }
     if (op === 'scan') await deviceTask(a.id, 'updates.scan', {}, { wait: false });
     else {
       const n = op === 'all' ? 'all pending updates' : `${sel.size} selected update(s)`;
@@ -2207,7 +2278,7 @@ async function devSettings(el, a) {
 }
 
 // ---------------- run-script modal ----------------
-async function openRunModal(agentIds) {
+async function openRunModal(agentIds, scriptId = null) {
   const [scripts, agents] = await Promise.all([api('GET', '/api/scripts'), api('GET', '/api/agents')]);
   const targets = agents.filter((a) => agentIds.includes(a.id));
   const platforms = new Set(targets.map((t) => t.platform));
@@ -2233,6 +2304,7 @@ async function openRunModal(agentIds) {
     $('#rm-desc', m).textContent = s ? `${s.description || ''} · timeout ${s.timeout}s` : '';
     $('#rm-preview', m).textContent = s ? s.body : '';
   };
+  if (scriptId != null && $(`#rm-script option[value="${Number(scriptId)}"]`, m)) $('#rm-script', m).value = String(scriptId);
   preview();
   $('#rm-script', m).addEventListener('change', preview);
   $$('[data-mode]', m).forEach((t) => t.addEventListener('click', (e) => {
@@ -2279,7 +2351,7 @@ async function pageClients(view) {
   const clients = await api('GET', '/api/clients');
   view.innerHTML = `<div class="page-head"><h1>Clients</h1>${can('tech') ? '<button class="btn primary" data-action="new-client">+ New client</button>' : ''}</div>
     <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Devices</th><th>Online</th><th>Notes</th></tr></thead><tbody>
-    ${clients.map((c) => `<tr class="clickable" data-href="#/clients/${c.id}"><td><strong>${esc(c.name)}</strong></td><td>${c.device_count}</td>
+    ${clients.map((c) => `<tr class="clickable" data-href="#/clients/${c.id}"><td><strong>${esc(c.name)}</strong> <span class="obj-id">#${c.id}</span></td><td>${c.device_count}</td>
       <td>${c.online_count}/${c.device_count}</td><td class="small muted">${esc(c.notes).slice(0, 120)}</td></tr>`).join('')
       || '<tr><td colspan="4" class="empty">No clients yet. Create one to start enrolling devices.</td></tr>'}
     </tbody></table></div></div>`;
@@ -2318,6 +2390,11 @@ async function pageClient(view, id) {
       ${can('tech') && c.devices.length ? `<button class="btn primary" data-action="run-on" data-ids="${c.devices.map((d) => d.id).join(',')}">Run script on all ${c.devices.length}</button>` : ''}
       ${can('tech') ? '<button class="btn" data-action="edit-client">Edit</button>' : ''}${can('admin') ? `<button class="btn danger" data-action="delete-client" data-id="${c.id}">Delete</button>` : ''}</div></div>
     ${c.notes ? `<div class="card" style="margin-bottom:16px;white-space:pre-wrap">${esc(c.notes)}</div>` : ''}
+    <div class="card flush" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;padding:12px 14px 0"><h2 style="margin:0">Contacts</h2>
+        ${can('tech') ? `<button class="btn sm" data-action="new-contact" data-client="${c.id}">+ Add contact</button>` : ''}</div>
+      ${(c.contacts || []).length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th class="right">Devices</th></tr></thead><tbody id="cl-contacts">
+        ${contactRows(c.contacts.map((x) => ({ ...x, devices: c.devices.filter((d) => d.contact_id === x.id).length })), false)}</tbody></table></div>`
+    : '<p class="small muted" style="padding:0 14px 12px">No contacts yet. Add the people you support here, then assign them to their devices.</p>'}</div>
     ${can('tech') ? `<div class="card" style="margin-bottom:16px"><h2>Install the agent</h2>
       ${cmds ? `
         <p class="small muted">Devices enroll into <strong>${esc(c.name)}</strong>. Token ${latest.expires_at ? `expires ${fmtDate(latest.expires_at)}` : 'never expires'}.</p>
@@ -2362,6 +2439,10 @@ async function pageClient(view, id) {
       <td>${meter(a.cpu_pct)}</td><td>${meter(a.mem_pct)}</td><td>${meter(a.disk_pct)}</td><td class="small">${a.online ? 'Online' : fmtAgo(a.last_seen)}</td></tr>`).join('')
       || '<tr><td colspan="6" class="empty">No devices enrolled yet</td></tr>'}</tbody></table></div></div>`;
   state.currentClient = c;
+  $('#cl-contacts')?.addEventListener('click', (e) => {
+    const r = e.target.closest('[data-contact]');
+    if (r && can('tech') && !e.target.closest('[data-stop]')) contactModal(c.contacts.find((x) => String(x.id) === r.dataset.contact));
+  });
 }
 
 function editClientModal() {
@@ -2393,7 +2474,7 @@ async function pageScripts(view) {
       const rows = vis.filter((s) => s.category === cat);
       if (!rows.length) return '';
       return `<h3 style="margin-top:18px">${esc(cat)}</h3><div class="card flush"><div class="table-wrap"><table><tbody>
-        ${rows.map((s) => `<tr class="clickable" data-href="#/scripts/${s.id}"><td style="width:34%"><strong>${esc(s.name)}</strong></td>
+        ${rows.map((s) => `<tr class="clickable" data-href="#/scripts/${s.id}"><td style="width:34%"><strong>${esc(s.name)}</strong> <span class="obj-id">#${s.id}</span></td>
           <td><span class="os">${shellIcon(s.shell)}${esc(s.shell)}</span></td><td class="small muted">${esc(s.description)}</td><td class="small nowrap">${s.timeout}s</td></tr>`).join('')}
         </tbody></table></div></div>`;
     }).join('') || '<div class="card muted">No scripts match.</div>';
@@ -2579,6 +2660,9 @@ async function pageSettings(view) {
         <div class="field"><label>Services monitored on all Linux devices</label><input type="text" name="watch_services_linux" value="${esc(s.watch_services_linux)}" placeholder="e.g. sshd, cron"></div>
         <div class="field"><label>Services monitored on all Macs (launchd labels)</label><input type="text" name="watch_services_macos" value="${esc(s.watch_services_macos)}" placeholder="e.g. com.openssh.sshd"></div></div>
       <div class="small muted" style="margin:-6px 0 12px">Comma separated service names. A critical alert opens when one stops and resolves when it runs again.</div>
+      <div class="form-grid">${num('role_scan_hours', 'Role detection (hours)', 'How often server roles are detected; 0 disables')}
+        <div class="field"><label>Patch window time zone</label><input name="patch_timezone" type="text" value="${esc(s.patch_timezone)}" placeholder="${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}">
+          <div class="small muted">IANA name, e.g. America/Chicago. Empty = the server's zone.</div></div></div>
       <div class="field"><label>Alert webhook URL</label><input name="webhook_url" type="url" value="${esc(s.webhook_url)}" placeholder="https://hooks.slack.com/… or Discord / Teams / ntfy webhook"></div>
       <div class="row"><button class="btn primary">Save settings</button><button type="button" class="btn" data-action="test-webhook">Send test</button></div>
       <p class="small muted">Current agent versions: Windows <span class="mono">${cfg.agent_versions.windows}</span>, Linux <span class="mono">${cfg.agent_versions.linux}</span>. Agents self-update when these change.</p></form>` : ''}
@@ -2620,67 +2704,6 @@ async function pageSettings(view) {
     try { await api('PUT', `/api/users/${sel.dataset.roleUser}`, { role: sel.value }); toast('Role updated'); }
     catch (err) { router(); throw err; }
   })));
-}
-
-// ---------------- patching (fleet) ----------------
-async function pagePatching(view) {
-  const sel = new Set();
-  let filter = state.patchFilter || '';
-  let reboot = false;
-  let rows = [];
-  view.innerHTML = `<div id="p-root"><div class="page-head"><h1>Patching</h1>
-      ${can('tech') ? `<div class="row"><label class="check small" style="margin:0"><input type="checkbox" id="p-reboot"> Reboot if required</label>
-        <button class="btn" data-p="scan" disabled>Scan selected</button><button class="btn primary" data-p="install" disabled>Install all updates on selected</button></div>` : ''}</div>
-    <div class="toolbar"><select id="p-filter"><option value="">All devices</option><option value="pending">Updates pending</option>
-      <option value="security">Security updates pending</option><option value="reboot">Reboot required</option><option value="stale">Not scanned in 3+ days</option></select>
-      <span class="small muted" id="p-count"></span></div>
-    <div class="card flush"><div class="table-wrap"><table><thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="p-all"></th>' : ''}
-      <th>Device</th><th>Client</th><th>OS</th><th class="right">Pending</th><th class="right">Security</th><th>Reboot</th><th>Last scan</th><th>Status</th></tr></thead>
-      <tbody id="p-body"></tbody></table></div></div>
-    <p class="small muted">Devices are scanned automatically (interval under Settings). Windows uses Windows Update; Linux uses apt / dnf / yum / zypper.</p></div>`;
-  const root = $('#p-root');
-  $('#p-filter').value = filter;
-  const visible = () => rows.filter((r) => {
-    if (filter === 'pending') return r.pending_updates > 0;
-    if (filter === 'security') return r.security_updates > 0;
-    if (filter === 'reboot') return r.reboot_required;
-    if (filter === 'stale') return !r.updates_checked_at || Date.now() - r.updates_checked_at > 3 * 86400000;
-    return true;
-  });
-  const draw = () => {
-    const vis = visible();
-    $('#p-count').textContent = `${vis.length} of ${rows.length}`;
-    $('#p-body').innerHTML = vis.map((r) => `<tr>${can('tech') ? `<td><input type="checkbox" data-pid="${r.id}" ${sel.has(r.id) ? 'checked' : ''}></td>` : ''}
-      <td class="nowrap">${statusDot(r)}<a href="#/devices/${r.id}/updates">${esc(r.hostname)}</a></td><td class="small">${esc(r.client_name || '—')}</td><td>${osCell(r)}</td>
-      <td class="right">${r.updates_checked_at ? (r.pending_updates || 0) : '—'}</td>
-      <td class="right">${r.security_updates ? badge(r.security_updates, 'bad') : (r.updates_checked_at ? '0' : '—')}</td>
-      <td>${r.reboot_required ? badge('required', 'warn') : ''}</td>
-      <td class="small nowrap">${r.updates_checked_at ? fmtAgo(r.updates_checked_at) : 'never'}</td>
-      <td>${r.busy ? badge(r.busy === 'updates.install' ? 'installing' : 'scanning', 'running') : ''}</td></tr>`).join('')
-      || '<tr><td colspan="9" class="empty">No devices match</td></tr>';
-    for (const b of $$('[data-p]')) b.disabled = !sel.size;
-    const all = $('#p-all');
-    if (all) all.checked = vis.length > 0 && vis.every((r) => sel.has(r.id));
-  };
-  const load = async () => { rows = await api('GET', '/api/patching'); draw(); };
-  $('#p-filter').addEventListener('change', (e) => { filter = state.patchFilter = e.target.value; draw(); });
-  root.addEventListener('change', (e) => {
-    if (e.target.id === 'p-reboot') reboot = e.target.checked;
-    if (e.target.dataset.pid) { e.target.checked ? sel.add(e.target.dataset.pid) : sel.delete(e.target.dataset.pid); draw(); }
-    if (e.target.id === 'p-all') { for (const r of visible()) e.target.checked ? sel.add(r.id) : sel.delete(r.id); draw(); }
-  });
-  root.addEventListener('click', guard(async (e) => {
-    const b = e.target.closest('[data-p]');
-    if (!b) return;
-    const install = b.dataset.p === 'install';
-    if (install && !await confirmDialog(`Install all pending updates on ${sel.size} device(s)${reboot ? ', rebooting where required' : ''}?`, { okLabel: 'Install' })) return;
-    const r = await api('POST', '/api/tasks', { agent_ids: [...sel], task: install ? 'updates.install' : 'updates.scan', args: install ? { ids: 'all', reboot } : {} });
-    toast(`${install ? 'Installing' : 'Scanning'} on ${r.created} device(s)`);
-    sel.clear();
-    await load();
-  }));
-  await load();
-  every(10000, load);
 }
 
 async function bulkSoftwareModal(ids) {
@@ -2842,10 +2865,732 @@ new MutationObserver(() => {
   requestAnimationFrame(() => { labelQueued = false; labelTables(document.body); });
 }).observe(document.body, { childList: true, subtree: true });
 
+// ---------------- small dropdown menus ----------------
+function popMenu(anchor, items) {
+  document.querySelector('.popmenu')?.remove();
+  const menu = document.createElement('div');
+  menu.className = 'popmenu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = items.map((it, i) => (it === '-' ? '<div class="sep"></div>'
+    : it.html ? `<div class="pm-html">${it.html}</div>`
+    : `<button type="button" role="menuitem" data-i="${i}" class="${it.danger ? 'danger' : ''}">${it.icon ? `<span class="pm-ic">${it.icon}</span>` : ''}${esc(it.label)}${it.hint ? `<span class="small muted">${esc(it.hint)}</span>` : ''}</button>`)).join('');
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  const w = Math.min(menu.offsetWidth || 260, window.innerWidth - 16);
+  menu.style.top = `${r.bottom + 6 + window.scrollY}px`;
+  menu.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`;
+  const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); document.removeEventListener('keydown', onKey, true); };
+  const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  setTimeout(() => { document.addEventListener('mousedown', outside, true); document.addEventListener('keydown', onKey, true); });
+  menu.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-i]');
+    if (!b) return;
+    close();
+    const it = items[Number(b.dataset.i)];
+    if (it.href) location.hash = it.href;
+    else guard(it.run)();
+  });
+  menu.querySelector('button')?.focus();
+  return menu;
+}
+
+// ---------------- favorites ----------------
+const favHref = () => (location.hash || '#/').replace(/^#?\/?$/, '#/');
+function renderFavs() {
+  const box = $('#nav-fav');
+  if (!box) return;
+  const favs = state.prefs.favorites || [];
+  box.innerHTML = favs.length ? `<div class="nav-title">★ Favorites</div><nav class="nav fav">${favs.map((f) => `<a href="${esc(f.href)}">${esc(f.label)}</a>`).join('')}</nav><div class="sep"></div>` : '';
+}
+function syncFavStar() {
+  const b = $('#fav-star');
+  if (!b) return;
+  const on = (state.prefs.favorites || []).some((f) => f.href === favHref());
+  b.textContent = on ? '★' : '☆';
+  b.classList.toggle('on', on);
+  b.title = on ? 'Remove from Favorites' : 'Add this page to Favorites';
+}
+
+// ---------------- notification bell (your commands / scripts finishing) ----------------
+let bellTimer = null, bellItems = [], bellToastAfter = Date.now();
+const bellKey = () => `hp-bell-${state.user?.username || ''}`;
+const bellSeen = () => { try { return Number(localStorage.getItem(bellKey())) || 0; } catch { return 0; } };
+function drawBellBadge() {
+  const n = bellItems.filter((j) => j.finished_at > bellSeen()).length;
+  const b = $('#bell-n');
+  if (b) { b.textContent = n > 9 ? '9+' : n; b.classList.toggle('hidden', !n); }
+}
+function startBell() {
+  clearInterval(bellTimer);
+  bellToastAfter = Date.now();
+  const tick = async () => {
+    if (!state.user) return;
+    const r = await api('GET', `/api/me/notifications?since=${Date.now() - 86400000}`);
+    bellItems = r.items;
+    for (const j of [...r.items].reverse()) {
+      if (j.finished_at <= bellToastAfter) continue;
+      bellToastAfter = j.finished_at;
+      toast(`${j.status === 'success' ? '✓' : '✗'} ${j.name} on ${j.hostname}: ${j.status}`, j.status === 'success' ? 'ok' : 'error');
+    }
+    drawBellBadge();
+  };
+  tick().catch(() => {});
+  bellTimer = setInterval(() => tick().catch(() => {}), 12000);
+}
+
+// ---------------- command palette / global search (Ctrl+K) ----------------
+const PALETTE_ACTIONS = () => [
+  ...(can('tech') ? [
+    { label: 'New client', run: () => newClientModal() },
+    { label: 'New contact', run: () => contactModal(null) },
+    { label: 'New script', run: () => { location.hash = '#/scripts/new'; } },
+    { label: 'New policy (configuration baseline)', run: () => { location.hash = '#/policies/new'; } },
+    { label: 'Detect server roles on all devices', run: async () => { const r = await api('POST', '/api/roles/detect', {}); toast(`Role detection queued on ${r.created} device(s)`); } },
+  ] : []),
+  ...(can('admin') ? [{ label: 'New patch policy', run: () => { location.hash = '#/patching/policies/new'; } }] : []),
+  { label: 'Executive report', run: () => { location.hash = '#/reports'; } },
+  { label: 'Preferences (theme, IDs)', run: () => preferencesModal() },
+];
+function openPalette() {
+  const m = openModal('Search or jump to…', `<input type="search" id="pal-q" placeholder="Device name, ID, IP, serial, user · client · script · contact · page" autocomplete="off" spellcheck="false">
+    <div id="pal-res" class="pal-res" role="listbox"></div>`, { foot: '<span class="small muted">↑ ↓ to choose · Enter to open · Esc to close</span>' });
+  m.classList.add('palette');
+  const deviceId = /^#\/devices\/([^/]+)/.exec(location.hash)?.[1];
+  let items = [], active = 0, seq = 0;
+  const draw = () => {
+    let group = '';
+    $('#pal-res', m).innerHTML = items.map((it, i) => {
+      const head = it.group !== group ? `<div class="pal-group">${esc(group = it.group)}</div>` : '';
+      return `${head}<button type="button" class="pal-item${i === active ? ' active' : ''}" data-i="${i}" role="option">${it.icon || ''}<span class="pal-label">${esc(it.label)}</span>${it.sub ? `<span class="small muted">${esc(it.sub)}</span>` : ''}</button>`;
+    }).join('') || '<div class="muted small" style="padding:12px">Nothing found</div>';
+    $('.pal-item.active', m)?.scrollIntoView({ block: 'nearest' });
+  };
+  const build = async (q) => {
+    const my = ++seq;
+    const ql = q.trim().toLowerCase();
+    const pages = NAV.filter(Boolean).filter(([, l]) => !ql || l.toLowerCase().includes(ql)).map(([href, label]) => ({ group: 'Pages', label, run: () => { location.hash = href; } }));
+    const acts = PALETTE_ACTIONS().filter((a) => !ql || a.label.toLowerCase().includes(ql)).map((a) => ({ ...a, group: 'Actions' }));
+    const favs = (state.prefs.favorites || []).filter((f) => !ql || f.label.toLowerCase().includes(ql)).map((f) => ({ group: 'Favorites', label: f.label, icon: '★ ', run: () => { location.hash = f.href; } }));
+    let found = { devices: [], clients: [], scripts: [], contacts: [] };
+    if (ql) { try { found = await api('GET', `/api/search?q=${encodeURIComponent(ql)}`); } catch { /* offline */ } }
+    if (my !== seq) return;
+    items = [
+      ...found.devices.map((d) => ({ group: 'Devices', label: d.hostname, sub: [d.client_name, d.ip, d.logged_user, d.online ? 'online' : 'offline'].filter(Boolean).join(' · '), icon: ICONS[d.platform] ? `<span class="os">${ICONS[d.platform]}</span>` : '', run: () => { location.hash = `#/devices/${d.id}`; } })),
+      ...found.scripts.map((s) => ({ group: deviceId ? 'Run a script on this device' : 'Scripts', label: s.name, sub: `${s.category} · ${s.shell}`,
+        run: () => (deviceId && can('tech') ? openRunModal([deviceId], s.id) : (location.hash = `#/scripts/${s.id}`)) })),
+      ...found.clients.map((c) => ({ group: 'Clients', label: c.name, run: () => { location.hash = `#/clients/${c.id}`; } })),
+      ...found.contacts.map((c) => ({ group: 'Contacts', label: c.name, sub: [c.email, c.client_name].filter(Boolean).join(' · '), run: () => { location.hash = `#/clients/${c.client_id}`; } })),
+      ...favs, ...pages, ...acts,
+    ];
+    active = 0;
+    draw();
+  };
+  const go = (i) => { const it = items[i]; if (!it) return; closeModal(); guard(it.run)(); };
+  const input = $('#pal-q', m);
+  let t = null;
+  input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => build(input.value), 150); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { active = Math.min(items.length - 1, active + 1); draw(); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { active = Math.max(0, active - 1); draw(); e.preventDefault(); }
+    else if (e.key === 'Enter') { e.preventDefault(); go(active); }
+  });
+  $('#pal-res', m).addEventListener('click', (e) => { const b = e.target.closest('[data-i]'); if (b) go(Number(b.dataset.i)); });
+  build('');
+  input.focus();
+}
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && state.user) { e.preventDefault(); openPalette(); }
+});
+
+// ---------------- preferences ----------------
+function preferencesModal() {
+  const p = state.prefs;
+  const m = openModal('Preferences', `<p class="small muted">These apply to your account only, on every browser you sign in with.</p>
+    <div class="field"><label>Theme</label><select id="pf-theme">
+      <option value="auto" ${p.theme === 'auto' ? 'selected' : ''}>Match my device (light or dark)</option>
+      <option value="light" ${p.theme === 'light' ? 'selected' : ''}>Light</option><option value="dark" ${p.theme === 'dark' ? 'selected' : ''}>Dark</option></select></div>
+    <label class="check"><input type="checkbox" id="pf-ids" ${p.show_ids ? 'checked' : ''}> Show object IDs (devices, clients, scripts, policies)</label>
+    <div class="field" style="margin-top:14px"><label>Favorites</label>${(p.favorites || []).length
+      ? `<div class="fav-edit">${p.favorites.map((f, i) => `<div class="row" style="justify-content:space-between"><span>★ ${esc(f.label)} <span class="small muted mono">${esc(f.href)}</span></span><button class="btn sm" data-unfav="${i}">Remove</button></div>`).join('')}</div>`
+      : '<div class="small muted">None yet. Click the ☆ next to a page title to pin it to the top of the menu.</div>'}</div>
+    <div class="field"><label>Devices list columns</label><button class="btn sm" id="pf-cols">Choose columns…</button></div>`,
+  { foot: '<button class="btn" data-action="close-modal">Close</button><button class="btn primary" id="pf-save">Save</button>' });
+  $('#pf-cols', m).addEventListener('click', () => columnChooser());
+  m.addEventListener('click', guard(async (e) => {
+    const u = e.target.closest('[data-unfav]');
+    if (!u) return;
+    const favorites = p.favorites.filter((_, i) => i !== Number(u.dataset.unfav));
+    await savePrefs({ favorites });
+    renderFavs(); syncFavStar(); preferencesModal();
+  }));
+  $('#pf-save', m).addEventListener('click', guard(async () => {
+    await savePrefs({ theme: $('#pf-theme', m).value, show_ids: $('#pf-ids', m).checked });
+    closeModal(); toast('Preferences saved'); router();
+  }));
+}
+
+// ---------------- devices list: column chooser ----------------
+const upTime = (a) => (a.online && a.boot_time ? fmtDur(Date.now() - a.boot_time) : '');
+const DEV_COLS = [
+  { id: 'client', label: 'Client', def: true, text: (a) => a.client_name || '', cell: (a) => esc(a.client_name || '—') },
+  { id: 'class', label: 'Type', def: true, text: (a) => a.device_class || '', cell: (a) => classBadge(a.device_class) },
+  { id: 'os', label: 'OS', def: true, text: (a) => a.os_name || '', cell: (a) => osCell(a) },
+  { id: 'ip', label: 'IP', def: true, text: (a) => (a.ip_addrs || []).join(' '), cell: (a) => `<span class="mono small">${esc((a.ip_addrs || [])[0] || '')}</span>` },
+  { id: 'user', label: 'User', def: true, text: (a) => a.logged_user || '', cell: (a) => `<span class="small">${esc(a.logged_user || '')}</span>` },
+  { id: 'cpu', label: 'CPU', def: true, text: () => '', cell: (a) => (a.online ? meter(a.cpu_pct) : '<span class="muted">—</span>') },
+  { id: 'ram', label: 'RAM', def: true, text: () => '', cell: (a) => (a.online ? meter(a.mem_pct) : '<span class="muted">—</span>') },
+  { id: 'disk', label: 'Disk', def: true, text: () => '', cell: (a) => meter(a.disk_pct) },
+  { id: 'last_seen', label: 'Last seen', def: true, text: (a) => (a.online ? 'online' : 'offline'), cell: (a) => `<span class="nowrap small ${a.online ? '' : 'muted'}">${a.online ? 'Online' : fmtAgo(a.last_seen)}</span>` },
+  { id: 'contact', label: 'Contact', text: (a) => a.contact_name || '', cell: (a) => esc(a.contact_name || '') },
+  { id: 'roles', label: 'Roles', text: (a) => (a.roles || []).map((r) => r.label).join(' '), cell: (a) => (a.roles || []).map((r) => badge(r.label, 'info')).join(' ') },
+  { id: 'public_ip', label: 'Public IP', text: (a) => a.public_ip || '', cell: (a) => `<span class="mono small">${esc(a.public_ip || '')}</span>` },
+  { id: 'manufacturer', label: 'Manufacturer', text: (a) => a.manufacturer || '', cell: (a) => esc(a.manufacturer || '') },
+  { id: 'model', label: 'Model', text: (a) => a.model || '', cell: (a) => esc(a.model || '') },
+  { id: 'serial', label: 'Serial', text: (a) => a.serial || '', cell: (a) => `<span class="mono small">${esc(a.serial || '')}</span>` },
+  { id: 'cpu_model', label: 'Processor', text: (a) => a.cpu_model || '', cell: (a) => `<span class="small">${esc(a.cpu_model || '')}</span>` },
+  { id: 'ram_total', label: 'Memory', text: () => '', cell: (a) => (a.ram_total ? fmtBytes(a.ram_total) : '') },
+  { id: 'uptime', label: 'Uptime', text: () => '', cell: (a) => `<span class="small nowrap">${upTime(a)}</span>` },
+  { id: 'updates', label: 'Pending updates', text: () => '', cell: (a) => (a.updates_checked_at ? `${a.pending_updates || 0}${a.security_updates ? ` ${badge(`${a.security_updates} security`, 'bad')}` : ''}` : '<span class="muted">—</span>') },
+  { id: 'reboot', label: 'Reboot', text: (a) => (a.reboot_required ? 'reboot required' : ''), cell: (a) => (a.reboot_required ? badge('required', 'warn') : '') },
+  { id: 'agent_version', label: 'Agent', text: (a) => a.agent_version || '', cell: (a) => `<span class="mono small">${esc(a.agent_version || '')}</span>${a.update_pending ? ` ${badge('update', 'info')}` : ''}` },
+  { id: 'enrolled', label: 'Enrolled', text: () => '', cell: (a) => `<span class="small nowrap">${a.enrolled_at ? new Date(a.enrolled_at).toLocaleDateString() : ''}</span>` },
+  { id: 'id', label: 'Device ID', text: (a) => a.id, cell: (a) => `<span class="mono small">${esc(a.id)}</span>` },
+];
+const DEV_COL = new Map(DEV_COLS.map((c) => [c.id, c]));
+function deviceColumns() {
+  const chosen = (state.prefs.columns || DEV_COLS.filter((c) => c.def).map((c) => c.id)).filter((id) => DEV_COL.has(id));
+  if (state.prefs.show_ids && !chosen.includes('id')) chosen.push('id');
+  return chosen.map((id) => DEV_COL.get(id));
+}
+function columnChooser() {
+  let cols = (state.prefs.columns || DEV_COLS.filter((c) => c.def).map((c) => c.id)).filter((id) => DEV_COL.has(id));
+  const m = openModal('Devices list columns', '<div id="cc-list"></div>', {
+    foot: '<button class="btn" id="cc-reset">Reset to default</button><span class="grow"></span><button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" id="cc-save">Save</button>',
+  });
+  const draw = () => {
+    const shown = cols.map((id) => DEV_COL.get(id));
+    const hidden = DEV_COLS.filter((c) => !cols.includes(c.id));
+    $('#cc-list', m).innerHTML = `<p class="small muted">Hostname is always first. Use the arrows to reorder.</p>
+      <div class="cc">${shown.map((c, i) => `<div class="cc-row"><label class="check"><input type="checkbox" checked data-cc="${c.id}"> ${esc(c.label)}</label>
+        <span><button class="btn sm" data-up="${i}" ${i ? '' : 'disabled'} aria-label="Move up">▲</button><button class="btn sm" data-down="${i}" ${i < shown.length - 1 ? '' : 'disabled'} aria-label="Move down">▼</button></span></div>`).join('')}
+      ${hidden.length ? `<div class="nav-title" style="margin-top:10px">Hidden</div>${hidden.map((c) => `<div class="cc-row"><label class="check"><input type="checkbox" data-cc="${c.id}"> ${esc(c.label)}</label></div>`).join('')}` : ''}</div>`;
+  };
+  m.addEventListener('change', (e) => {
+    const id = e.target.dataset.cc;
+    if (!id) return;
+    cols = e.target.checked ? [...cols, id] : cols.filter((x) => x !== id);
+    draw();
+  });
+  m.addEventListener('click', guard(async (e) => {
+    const up = e.target.closest('[data-up]'), down = e.target.closest('[data-down]');
+    if (up || down) {
+      const i = Number((up || down).dataset[up ? 'up' : 'down']), j = up ? i - 1 : i + 1;
+      [cols[i], cols[j]] = [cols[j], cols[i]];
+      draw();
+    }
+    if (e.target.id === 'cc-reset') { await savePrefs({ columns: null }); closeModal(); router(); }
+    if (e.target.id === 'cc-save') { await savePrefs({ columns: cols }); closeModal(); toast('Columns saved'); router(); }
+  }));
+  draw();
+}
+
+// ---------------- contacts ----------------
+async function contactModal(c, { clientId = null, onSaved = () => router() } = {}) {
+  const clients = await api('GET', '/api/clients');
+  const v = c || { client_id: clientId };
+  const m = openModal(c ? `Edit ${c.name}` : 'New contact', `<form id="ct-form"><div class="form-grid">
+      <div class="field"><label>Name</label><input type="text" name="name" required maxlength="100" value="${esc(v.name || '')}"></div>
+      <div class="field"><label>Client</label><select name="client_id" ${c ? 'disabled' : ''}>${clients.map((x) => `<option value="${x.id}" ${String(x.id) === String(v.client_id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Email</label><input name="email" type="email" maxlength="200" value="${esc(v.email || '')}"></div>
+      <div class="field"><label>Phone</label><input type="text" name="phone" maxlength="50" value="${esc(v.phone || '')}"></div>
+      <div class="field"><label>Job title</label><input type="text" name="title" maxlength="100" value="${esc(v.title || '')}"></div></div>
+      <div class="field"><label>Notes</label><textarea name="notes" maxlength="2000">${esc(v.notes || '')}</textarea></div></form>`,
+  { foot: `${c ? '<button class="btn danger" id="ct-del">Delete</button><span class="grow"></span>' : ''}<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="ct-form">Save</button>` });
+  if (!clients.length) { $('#ct-form', m).innerHTML = '<p>Create a client first.</p>'; return; }
+  $('#ct-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target));
+    if (c) await api('PUT', `/api/contacts/${c.id}`, body); else await api('POST', '/api/contacts', body);
+    closeModal(); toast('Contact saved'); onSaved();
+  }));
+  $('#ct-del', m)?.addEventListener('click', guard(async () => {
+    if (!await confirmDialog(`Delete ${c.name}? Devices assigned to them are unassigned.`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/contacts/${c.id}`); toast('Contact deleted'); onSaved();
+  }));
+}
+const contactRows = (list, showClient) => list.map((c) => `<tr class="clickable" data-contact="${c.id}"><td><strong>${esc(c.name)}</strong>${c.title ? `<div class="small muted">${esc(c.title)}</div>` : ''}</td>
+  ${showClient ? `<td>${esc(c.client_name || '')}</td>` : ''}<td>${c.email ? `<a href="mailto:${esc(c.email)}" data-stop>${esc(c.email)}</a>` : ''}</td><td>${esc(c.phone || '')}</td>
+  <td class="right">${c.devices ?? ''}</td></tr>`).join('');
+async function pageContacts(view) {
+  const list = await api('GET', '/api/contacts');
+  view.innerHTML = `<div class="page-head"><h1>Contacts</h1>${can('tech') ? '<button class="btn primary" data-action="new-contact">+ New contact</button>' : ''}</div>
+    <div class="toolbar"><input type="search" id="ct-q" placeholder="Search name, email, phone, client…"></div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th><th>Client</th><th>Email</th><th>Phone</th><th class="right">Devices</th></tr></thead>
+    <tbody id="ct-body"></tbody></table></div></div>
+    <p class="small muted">Assign a contact to a device on its Overview tab. It shows up in search, on the device and in reports.</p>`;
+  const draw = () => {
+    const q = $('#ct-q').value.toLowerCase();
+    const rows = list.filter((c) => !q || [c.name, c.email, c.phone, c.client_name, c.title].join(' ').toLowerCase().includes(q));
+    $('#ct-body').innerHTML = contactRows(rows, true) || '<tr><td colspan="5" class="empty">No contacts yet</td></tr>';
+  };
+  $('#ct-q').addEventListener('input', draw);
+  view.addEventListener('click', (e) => {
+    const r = e.target.closest('[data-contact]');
+    if (r && can('tech') && !e.target.closest('[data-stop]')) contactModal(list.find((c) => String(c.id) === r.dataset.contact));
+  }, { signal: state.pageAbort.signal });
+  draw();
+}
+
+// ---------------- role monitoring ----------------
+const ROLE_STATE = { ok: ['Healthy', 'ok'], failed: ['Failing', 'bad'], offline: ['Offline', ''], unknown: ['Waiting for data', 'info'] };
+async function pageRoles(view) {
+  const open = new Set(state.rolesOpen || []);
+  const draw = async () => {
+    const d = await api('GET', '/api/roles');
+    const used = d.packs.filter((p) => p.devices.length);
+    const groups = [...new Set(d.packs.map((p) => p.group))];
+    view.innerHTML = `<div class="page-head"><div><h1>Role monitoring</h1>
+        <div class="small muted">Devices are checked for server roles automatically (${d.scanned} of ${d.total} scanned). Each role watches its services and alerts when one stops.</div></div>
+        <div class="row">${can('tech') ? '<button class="btn" data-r="detect">Detect roles now</button>' : ''}${can('admin') ? '<button class="btn" data-r="config">Configure monitoring</button>' : ''}</div></div>
+      ${used.length ? '' : '<div class="card" style="margin-bottom:16px">No server roles detected yet. Detection runs on Windows and Linux devices every day (Settings → Role detection), or click <strong>Detect roles now</strong>.</div>'}
+      ${groups.map((g) => {
+    const packs = d.packs.filter((p) => p.group === g);
+    return `<h2 style="margin:18px 0 10px">${esc(g)}</h2><div class="role-grid">${packs.map((p) => `<button type="button" class="role-card ${p.devices.length ? '' : 'empty'} ${open.has(p.id) ? 'open' : ''}" data-pack="${p.id}">
+          <div class="row" style="justify-content:space-between"><strong>${p.icon} ${esc(p.label)}</strong>${p.level === 'off' ? badge('off') : p.failed ? badge(`${p.failed} failing`, 'bad') : p.devices.length ? badge(p.success == null ? 'waiting' : `${p.success}% healthy`, p.success === 100 ? 'ok' : 'info') : ''}</div>
+          <div class="small muted">${p.devices.length} device${p.devices.length === 1 ? '' : 's'} · alerts: ${esc(d.levels[p.level].split(' (')[0].toLowerCase())}</div>
+          <div class="role-bar"><span style="width:${p.ok + p.failed ? (p.ok / (p.ok + p.failed)) * 100 : 0}%"></span></div></button>`).join('')}</div>
+        ${packs.filter((p) => open.has(p.id) && p.devices.length).map((p) => `<div class="card flush" style="margin-top:10px"><h2 style="padding:12px 14px 0">${p.icon} ${esc(p.label)} <span class="small muted">${esc(p.desc)}</span></h2>
+          <div class="table-wrap"><table><thead><tr><th>Device</th><th>Status</th><th>Monitored services</th></tr></thead><tbody>
+          ${p.devices.map((dv) => `<tr class="clickable" data-href="#/devices/${dv.id}"><td>${ICONS[dv.platform] ? `<span class="os">${ICONS[dv.platform]}</span>` : ''}<strong>${esc(dv.hostname)}</strong></td>
+            <td>${badge(...ROLE_STATE[dv.state])}</td>
+            <td>${dv.monitors.map((mo) => `<span class="svc ${mo.state}" title="${esc(mo.display || mo.name)}: ${esc(mo.status || 'no data yet')}">${esc(mo.name)}</span>`).join(' ')}</td></tr>`).join('')}
+          </tbody></table></div></div>`).join('')}`;
+  }).join('')}`;
+  };
+  view.addEventListener('click', guard(async (e) => {
+    const card = e.target.closest('[data-pack]');
+    if (card) { open.has(card.dataset.pack) ? open.delete(card.dataset.pack) : open.add(card.dataset.pack); state.rolesOpen = [...open]; await draw(); return; }
+    const b = e.target.closest('[data-r]');
+    if (b?.dataset.r === 'detect') { const r = await api('POST', '/api/roles/detect', {}); toast(`Role detection queued on ${r.created} online device(s). Results appear within a few minutes.`); }
+    if (b?.dataset.r === 'config') roleConfigModal(draw);
+  }), { signal: state.pageAbort.signal });
+  await draw();
+  every(30000, draw);
+}
+async function roleConfigModal(onSaved) {
+  const d = await api('GET', '/api/roles');
+  const m = openModal('Configure role monitoring', `<p class="small muted">Pick an alert level per role. <strong>Off</strong> stops watching its services. <strong>Low</strong> opens warning alerts and <strong>High</strong> opens critical alerts when a role service stops.</p>
+    <table class="dash"><tbody>${d.packs.map((p) => `<tr><td><strong>${p.icon} ${esc(p.label)}</strong><div class="small muted">${esc(p.desc)}</div></td>
+      <td class="right"><select data-level="${p.id}" style="width:auto">${Object.entries(d.levels).map(([k, l]) => `<option value="${k}" ${p.level === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table>
+    <div class="row" style="margin-top:10px"><span class="small muted">Set all to:</span>${Object.keys(d.levels).map((k) => `<button class="btn sm" data-all="${k}">${k}</button>`).join('')}</div>`,
+  { wide: true, foot: '<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" id="rl-save">Save</button>' });
+  m.addEventListener('click', (e) => { const b = e.target.closest('[data-all]'); if (b) $$('[data-level]', m).forEach((s) => { s.value = b.dataset.all; s.classList.add('changed'); }); });
+  m.addEventListener('change', (e) => e.target.dataset.level && e.target.classList.add('changed'));
+  $('#rl-save', m).addEventListener('click', guard(async () => {
+    const levels = Object.fromEntries($$('[data-level]', m).map((s) => [s.dataset.level, s.value]));
+    await api('PUT', '/api/roles/levels', { levels });
+    closeModal(); toast('Role monitoring saved. Devices pick it up on their next check-in.'); onSaved();
+  }));
+}
+
+// ---------------- executive report ----------------
+async function pageReports(view) {
+  const clients = await api('GET', '/api/clients');
+  view.innerHTML = `<div class="page-head no-print"><h1>Executive report</h1><div class="row">
+      <select id="rp-client" style="width:auto"><option value="">All clients</option>${clients.map((c) => `<option value="${c.id}" ${String(state.reportClient || '') === String(c.id) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <button class="btn primary" id="rp-print">Print / save as PDF</button></div></div>
+    <div id="rp-body" class="report muted">Building report…</div>`;
+  const draw = async () => {
+    const cid = $('#rp-client').value;
+    state.reportClient = cid;
+    const r = await api('GET', `/api/reports/executive${cid ? `?client_id=${cid}` : ''}`);
+    const kpi = (label, value, cls = '', sub = '') => `<div class="rp-kpi ${cls}"><div class="rp-v">${value}</div><div class="rp-l">${esc(label)}</div>${sub ? `<div class="small muted">${sub}</div>` : ''}</div>`;
+    const pctCls = (v) => (v == null ? '' : v >= 90 ? 'ok' : v >= 70 ? 'warn' : 'bad');
+    const sev = (o) => ['critical', 'warning', 'info'].map((k) => o[k] ? `${o[k]} ${k}` : '').filter(Boolean).join(' · ') || 'none';
+    const cls = Object.entries(r.devices.by_class).map(([k, n]) => `${n} ${(CLASS_INFO[k] || [k])[0].toLowerCase()}${n === 1 ? '' : 's'}`).join(' · ');
+    $('#rp-body').className = 'report';
+    $('#rp-body').innerHTML = `<div class="rp-head"><div><h1>${r.client ? esc(r.client.name) : 'All clients'}: IT health report</h1>
+        <div class="muted">Generated ${fmtDate(r.generated_at)} by HostPilot RMM</div></div><img src="/favicon.svg" alt="" width="44" height="44"></div>
+      <div class="rp-kpis">
+        ${kpi('Managed devices', r.devices.total, '', cls)}
+        ${kpi('Online now', `${r.devices.online}<span class="rp-of">/${r.devices.total}</span>`, r.devices.online === r.devices.total ? 'ok' : 'warn')}
+        ${kpi('Patch compliance', r.patching.compliance == null ? '—' : `${r.patching.compliance}%`, pctCls(r.patching.compliance), `${r.patching.scanned} device(s) scanned`)}
+        ${kpi('Policy compliance', r.policies.compliance == null ? '—' : `${r.policies.compliance}%`, pctCls(r.policies.compliance), `${r.policies.passed} of ${r.policies.checks} checks passed`)}
+        ${kpi('Open alerts', r.alerts.open, r.alerts.open ? 'bad' : 'ok', sev(r.alerts.open_by_severity))}
+        ${kpi('Alerts (30 days)', r.alerts.last_30_days, '', sev(r.alerts.by_severity_30))}
+      </div>
+      <div class="grid cols-2">
+        <div class="card"><h3>Patching</h3><dl class="kv"><dt>Pending updates</dt><dd>${r.patching.pending}</dd><dt>Security updates pending</dt><dd>${r.patching.security_pending ? badge(r.patching.security_pending, 'bad') : '0'}</dd>
+          <dt>Waiting for a reboot</dt><dd>${r.patching.reboot_required}</dd><dt>Without a patch policy</dt><dd>${r.patching.no_policy}</dd></dl></div>
+        <div class="card"><h3>Server roles</h3>${r.roles.length ? `<table class="dash"><tbody>${r.roles.map((x) => `<tr><td>${esc(x.label)}</td><td class="right">${x.devices} device(s)</td><td class="right">${x.failed ? badge(`${x.failed} failing`, 'bad') : badge('healthy', 'ok')}</td></tr>`).join('')}</tbody></table>` : '<div class="muted small">No server roles detected.</div>'}</div>
+        <div class="card"><h3>Disks running out of space</h3>${r.disks.length ? `<table class="dash"><tbody>${r.disks.map((x) => `<tr><td>${esc(x.hostname)}</td><td class="mono small">${esc(x.mount)}</td><td class="right">${badge(`${x.pct}% full`, x.pct >= 95 ? 'bad' : 'warn')}</td></tr>`).join('')}</tbody></table>` : '<div class="muted small">All disks have enough free space.</div>'}</div>
+        <div class="card"><h3>Devices with the most open alerts</h3>${r.top_alerts.length ? `<table class="dash"><tbody>${r.top_alerts.map((x) => `<tr><td>${esc(x.hostname)}</td><td class="right">${x.open}</td></tr>`).join('')}</tbody></table>` : '<div class="muted small">No open alerts.</div>'}</div>
+      </div>
+      <div class="card flush" style="margin-top:16px"><h3 style="padding:14px 14px 0">Device inventory</h3><div class="table-wrap"><table><thead><tr><th>Device</th>${r.client ? '' : '<th>Client</th>'}<th>Type</th><th>OS</th><th>Model</th><th>Serial</th><th>User / contact</th><th>Status</th></tr></thead><tbody>
+        ${r.inventory.map((x) => `<tr><td><strong>${esc(x.hostname)}</strong></td>${r.client ? '' : `<td>${esc(x.client || '')}</td>`}<td>${esc((CLASS_INFO[x.class] || [x.class])[0])}</td><td class="small">${esc(x.os || '')}</td>
+          <td class="small">${esc(x.model)}</td><td class="mono small">${esc(x.serial || '')}</td><td class="small">${esc([x.user, x.contact].filter(Boolean).join(' / '))}</td>
+          <td class="small nowrap">${x.online ? 'Online' : `Last seen ${fmtAgo(x.last_seen)}`}</td></tr>`).join('')}</tbody></table></div></div>`;
+  };
+  $('#rp-client').addEventListener('change', guard(draw));
+  $('#rp-print').addEventListener('click', () => window.print());
+  await draw();
+}
+
+// ---------------- device: history & screenshots ----------------
+const HIST_KINDS = [['', 'Everything'], ['events', 'Start-ups, sign-ins, software & patching'], ['jobs', 'Commands & scripts'], ['alerts', 'Alerts'], ['chat', 'Chat'], ['audit', 'Technician actions']];
+const HIST_ICON = { startup: '⏻', user: '👤', software: '📦', patch: '🩹', agent: '🛰', os: '🖥', network: '🌐', role: '🏷', job: '▶', alert: '⚠', 'alert-resolved': '✓', chat: '💬', audit: '🛠' };
+async function devHistory(el, a) {
+  let kind = '';
+  const draw = async () => {
+    const items = await api('GET', `/api/agents/${a.id}/history${kind ? `?kinds=${kind}` : ''}`);
+    let day = '';
+    el.innerHTML = `<div class="toolbar"><select id="h-kind" style="width:auto">${HIST_KINDS.map(([k, l]) => `<option value="${k}" ${k === kind ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <input type="search" id="h-q" placeholder="Filter…"><span class="small muted">${items.length} event(s), newest first</span></div>
+      <div class="card"><div class="timeline">${items.map((it) => {
+    const d = new Date(it.ts).toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+    const head = d !== day ? `<div class="tl-day">${esc(day = d)}</div>` : '';
+    return `${head}<div class="tl-item ${it.kind}${it.severity === 'critical' ? ' crit' : ''}" data-text="${esc(it.text.toLowerCase())}"><span class="tl-time">${new Date(it.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          <span class="tl-ic">${HIST_ICON[it.kind] || '•'}</span><span class="tl-text">${it.job_id ? `<a href="#" data-job="${it.job_id}">${esc(it.text)}</a>` : esc(it.text)}</span></div>`;
+  }).join('') || '<div class="muted">No history yet. Events are recorded from now on: start-ups, sign-ins, software changes, patching, commands and alerts.</div>'}</div></div>`;
+    $('#h-kind', el).addEventListener('change', guard(async (e) => { kind = e.target.value; await draw(); }));
+    $('#h-q', el).addEventListener('input', (e) => { const q = e.target.value.toLowerCase(); $$('.tl-item', el).forEach((i) => i.classList.toggle('hidden', !!q && !i.dataset.text.includes(q))); });
+  };
+  await draw();
+}
+async function devScreenshots(el, a) {
+  if (!can('tech')) { el.innerHTML = '<div class="card">Screenshots require the tech role.</div>'; return; }
+  const draw = async () => {
+    const list = await api('GET', `/api/agents/${a.id}/screenshots`);
+    const pending = list.some((s) => s.status === 'pending');
+    el.innerHTML = `<div class="card" style="margin-bottom:16px"><div class="row" style="justify-content:space-between"><div>
+        <strong>Screenshots</strong><div class="small muted">Captures what's on the device's screen in the background; the user isn't notified. The newest 50 are kept.</div></div>
+        <button class="btn primary" data-shot ${pending || !a.online ? 'disabled' : ''}>${pending ? 'Taking screenshot…' : '📷 Take screenshot'}</button></div></div>
+      <div class="shots">${list.map((s) => `<div class="shot ${s.status}">${s.status === 'ready'
+    ? `<a href="/api/screenshots/${s.id}/image" target="_blank" rel="noopener"><img src="/api/screenshots/${s.id}/image" alt="Screenshot ${esc(fmtDate(s.created_at))}" loading="lazy"></a>`
+    : `<div class="shot-ph">${s.status === 'pending' ? 'Waiting for the device…' : 'Failed (screen locked, nobody signed in, or device offline)'}</div>`}
+        <div class="row" style="justify-content:space-between"><span class="small">${fmtDate(s.created_at)} <span class="muted">· ${esc(s.created_by || '')}</span></span>
+          <span class="row">${s.status === 'ready' ? `<a class="btn sm" href="/api/screenshots/${s.id}/image?download=1">Download</a>` : ''}<button class="btn sm" data-del-shot="${s.id}">Delete</button></span></div></div>`).join('')
+    || '<div class="muted">No screenshots yet.</div>'}</div>`;
+    return pending;
+  };
+  el.addEventListener('click', guard(async (e) => {
+    if (e.target.closest('[data-shot]')) { await api('POST', `/api/agents/${a.id}/screenshot`); toast('Screenshot requested'); await draw(); }
+    const d = e.target.closest('[data-del-shot]');
+    if (d) { await api('DELETE', `/api/screenshots/${d.dataset.delShot}`); await draw(); }
+  }));
+  await draw();
+  every(3000, async () => { if ($('.shot.pending', el)) await draw(); });
+}
+
+// ---------------- device: contact, roles & patch policy card ----------------
+async function devAssignCard(a) {
+  const box = $('#ov-assign');
+  if (!box) return;
+  const [contacts, patch] = await Promise.all([a.client_id ? api('GET', `/api/contacts?client_id=${a.client_id}`) : Promise.resolve([]), api('GET', `/api/agents/${a.id}/patch`)]);
+  if (!$('#ov-assign')) return;
+  const p = patch.policy;
+  box.innerHTML = `<h3>Contact, roles & patching</h3><dl class="kv">
+    <dt>Contact</dt><dd>${can('tech') ? `<select id="ov-contact" style="width:auto;max-width:100%"><option value="">— none —</option>${contacts.map((c) => `<option value="${c.id}" ${c.id === a.contact_id ? 'selected' : ''}>${esc(c.name)}${c.email ? ` (${esc(c.email)})` : ''}</option>`).join('')}</select>
+      <button class="btn sm" data-action="new-contact" data-client="${a.client_id || ''}">+ New</button>` : esc(a.contact_name || '—')}
+      ${a.contact_email || a.contact_phone ? `<div class="small muted">${[a.contact_email ? `<a href="mailto:${esc(a.contact_email)}">${esc(a.contact_email)}</a>` : '', esc(a.contact_phone || '')].filter(Boolean).join(' · ')}</div>` : ''}</dd>
+    <dt>Server roles</dt><dd>${(a.roles || []).length ? a.roles.map((r) => `<a href="#/roles">${badge(r.label, 'info')}</a>`).join(' ') : `<span class="muted">${a.roles_at ? 'none detected' : 'not checked yet'}</span>`}</dd>
+    <dt>Patch policy</dt><dd>${p ? `<a href="#/patching/policies/${p.id}">${esc(p.name)}</a>${patch.source === 'override' ? ` ${badge('override', 'warn')}` : ''}
+      <div class="small muted">${p.window.open ? `Window open until ${esc(p.window.open_until)}` : p.window.next_start ? `Next window ${esc(p.window.next_start)}` : ''}</div>`
+    : patch.source === 'override-none' ? `${badge('patching disabled', 'warn')} <span class="small muted">(override)</span>` : '<span class="muted">none</span>'}</dd>
+  </dl>`;
+  $('#ov-contact')?.addEventListener('change', guard(async (e) => {
+    await api('PUT', `/api/agents/${a.id}`, { contact_id: e.target.value || null });
+    toast('Contact assigned');
+  }));
+}
+
+// ---------------- patch manager ----------------
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const APPROVAL_BADGE = { approved: ['Approved', 'ok'], denied: ['Denied', 'bad'], pending: ['Needs approval', 'warn'] };
+const approvalBadge = (s, by) => { const [l, c] = APPROVAL_BADGE[s] || [s, '']; return `${badge(l, c)}${by ? ` <span class="small muted">${by === 'auto' ? 'automatic' : 'manual'}</span>` : ''}`; };
+const windowText = (p) => `${(p.schedule.days || []).length === 7 ? 'Every day' : (p.schedule.days || []).map((d) => DAY_NAMES[d]).join(', ')} ${p.schedule.start}, ${p.schedule.hours} h`;
+const REBOOT_TEXT = { never: "Don't reboot", auto: 'Reboot automatically (2 min warning)', notify: 'Warn the user, then reboot' };
+
+async function pagePatching(view, tab = 'dashboard', sub) {
+  if (tab === 'policies' && sub) return patchPolicyEdit(view, sub);
+  const tabs = [['dashboard', 'Dashboard'], ['devices', 'Devices'], ['approvals', 'Approvals'], ['policies', 'Policies']];
+  view.innerHTML = `<div class="page-head"><h1>Patch manager</h1></div>
+    <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/patching/${k}" class="${k === tab ? 'active' : ''}">${l}<span class="badge warn hidden" id="pt-${k}"></span></a>`).join('')}</nav><div id="pt-body"></div>`;
+  const body = $('#pt-body');
+  api('GET', '/api/patch/dashboard').then((d) => { const b = $('#pt-approvals'); if (b && d.awaiting_approval) { b.textContent = d.awaiting_approval; b.classList.remove('hidden'); } }).catch(() => {});
+  await ({ dashboard: patchDashboardTab, devices: patchDevicesTab, approvals: patchApprovalsTab, policies: patchPoliciesTab }[tab] || patchDashboardTab)(body);
+}
+
+async function patchDashboardTab(el) {
+  const d = await api('GET', '/api/patch/dashboard');
+  const tile = (label, n, href, warn = true) => `<a class="wcard wkpi ${n && warn ? 'bad' : 'ok'}" href="${href}"><div class="wtitle">${label}</div><div class="wval">${n}</div></a>`;
+  el.innerHTML = `<div class="patch-tiles">
+      <div class="wcard wkpi ${d.compliance == null ? '' : d.compliance >= 90 ? 'ok' : 'bad'}"><div class="wtitle">Compliance score</div><div class="wval">${d.compliance == null ? '—' : `${d.compliance}%`}</div></div>
+      ${tile('Patching now', d.patching_now, '#/patching/devices', false)}
+      ${tile('No patch inventory', d.no_inventory, '#/patching/devices')}
+      ${tile('Need a reboot', d.reboot_required, '#/patching/devices')}
+      ${tile('Using WSUS', d.wsus, '#/patching/devices')}
+      ${tile('No patch policy', d.no_policy, '#/patching/policies')}
+      ${tile('Updates awaiting approval', d.awaiting_approval, '#/patching/approvals')}
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><h3>Pending updates by approval</h3>${wDonut([[d.updates.approved, WC.green, 'Approved'], [d.updates.pending, WC.amber, 'Needs approval'], [d.updates.denied, WC.red, 'Denied']], `${d.updates.approved + d.updates.pending + d.updates.denied}`)}
+        <div class="small muted">Counted per device. Approved updates are installed in each device's next maintenance window.</div></div>
+      <div class="card"><h3>Pending updates by type</h3>${d.by_category.some((c) => c.n)
+    ? wHBars(d.by_category.filter((c) => c.n).map((c, i) => [c.n, [WC.red, WC.amber, WC.blue, WC.purple || WC.pink, WC.green, WC.gray][i % 6], c.label]))
+    : '<div class="muted">Nothing pending. Every scanned device is up to date.</div>'}</div>
+      <div class="card" style="grid-column:1/-1"><h3>Maintenance windows</h3>${d.next_windows.length ? `<table class="dash"><tbody>${d.next_windows.map((w) => `<tr><td><a href="#/patching/policies/${w.id}">${esc(w.name)}</a></td>
+        <td>${w.open ? badge(`open until ${w.open_until}`, 'ok') : `next: ${esc(w.next_start || '—')}`}</td><td class="small muted right">${esc(w.tz)}</td></tr>`).join('')}</tbody></table>`
+    : `<div class="muted">No patch policies yet. ${can('admin') ? '<a href="#/patching/policies/new">Create one</a> to install approved updates automatically in a maintenance window.' : ''}</div>`}</div>
+    </div>`;
+}
+
+async function patchDevicesTab(el) {
+  const sel = new Set();
+  let filter = state.patchFilter || '', reboot = false, rows = [];
+  el.innerHTML = `<div class="toolbar"><select id="p-filter"><option value="">All devices</option><option value="pending">Updates pending</option>
+      <option value="approved">Approved updates waiting</option><option value="security">Security updates pending</option><option value="reboot">Reboot required</option>
+      <option value="stale">No patch inventory (7+ days)</option><option value="nopolicy">No patch policy</option><option value="wsus">Using WSUS</option></select>
+      <span class="small muted" id="p-count"></span><span class="grow"></span>
+      ${can('tech') ? `<label class="check small" style="margin:0"><input type="checkbox" id="p-reboot"> Reboot if required</label>
+        <button class="btn" data-p="scan" disabled>Scan selected</button><button class="btn primary" data-p="install" disabled>Install all updates on selected</button>` : ''}</div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="p-all"></th>' : ''}
+      <th>Device</th><th>Client</th><th>Patch policy</th><th class="right">Approved</th><th class="right">Needs approval</th><th class="right">Security</th><th>Reboot</th><th>Last scan</th><th>Status</th></tr></thead>
+      <tbody id="p-body"></tbody></table></div></div>
+    <p class="small muted">Devices are scanned automatically (interval under Settings). Windows uses Windows Update; Linux uses apt / dnf / yum / zypper; macOS uses softwareupdate.</p>`;
+  $('#p-filter', el).value = filter;
+  const visible = () => rows.filter((r) => {
+    if (filter === 'pending') return r.pending_updates > 0;
+    if (filter === 'approved') return r.approved > 0;
+    if (filter === 'security') return r.security_updates > 0;
+    if (filter === 'reboot') return r.reboot_required;
+    if (filter === 'stale') return !r.updates_checked_at || Date.now() - r.updates_checked_at > 7 * 86400000;
+    if (filter === 'nopolicy') return !r.policy;
+    if (filter === 'wsus') return r.wsus;
+    return true;
+  });
+  const draw = () => {
+    const vis = visible();
+    $('#p-count', el).textContent = `${vis.length} of ${rows.length}`;
+    $('#p-body', el).innerHTML = vis.map((r) => `<tr>${can('tech') ? `<td><input type="checkbox" data-pid="${r.id}" ${sel.has(r.id) ? 'checked' : ''}></td>` : ''}
+      <td class="nowrap">${statusDot(r)}<a href="#/devices/${r.id}/updates">${esc(r.hostname)}</a>${r.wsus ? ` ${badge('WSUS', 'warn')}` : ''}</td><td class="small">${esc(r.client_name || '—')}</td>
+      <td class="small">${r.policy ? `<a href="#/patching/policies/${r.policy.id}">${esc(r.policy.name)}</a>${r.policy_source === 'override' ? ` ${badge('override', 'warn')}` : ''}` : r.policy_source === 'override-none' ? badge('disabled', 'warn') : '<span class="muted">none</span>'}</td>
+      <td class="right">${r.updates_checked_at ? r.approved : '—'}</td><td class="right">${r.pending ? badge(r.pending, 'warn') : (r.updates_checked_at ? '0' : '—')}</td>
+      <td class="right">${r.security_updates ? badge(r.security_updates, 'bad') : (r.updates_checked_at ? '0' : '—')}</td>
+      <td>${r.reboot_required ? badge('required', 'warn') : ''}</td>
+      <td class="small nowrap">${r.updates_checked_at ? fmtAgo(r.updates_checked_at) : 'never'}</td>
+      <td>${r.busy ? badge(r.busy === 'updates.install' ? 'installing' : 'scanning', 'running') : r.compliant ? badge('compliant', 'ok') : ''}</td></tr>`).join('')
+      || '<tr><td colspan="10" class="empty">No devices match</td></tr>';
+    for (const b of $$('[data-p]', el)) b.disabled = !sel.size;
+    const all = $('#p-all', el);
+    if (all) all.checked = vis.length > 0 && vis.every((r) => sel.has(r.id));
+  };
+  const load = async () => { rows = await api('GET', '/api/patch/devices'); draw(); };
+  $('#p-filter', el).addEventListener('change', (e) => { filter = state.patchFilter = e.target.value; draw(); });
+  el.addEventListener('change', (e) => {
+    if (e.target.id === 'p-reboot') reboot = e.target.checked;
+    if (e.target.dataset.pid) { e.target.checked ? sel.add(e.target.dataset.pid) : sel.delete(e.target.dataset.pid); draw(); }
+    if (e.target.id === 'p-all') { for (const r of visible()) e.target.checked ? sel.add(r.id) : sel.delete(r.id); draw(); }
+  });
+  el.addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-p]');
+    if (!b) return;
+    const install = b.dataset.p === 'install';
+    if (install && !await confirmDialog(`Install all pending updates on ${sel.size} device(s)${reboot ? ', rebooting where required' : ''}? This ignores approvals.`, { okLabel: 'Install' })) return;
+    const r = await api('POST', '/api/tasks', { agent_ids: [...sel], task: install ? 'updates.install' : 'updates.scan', args: install ? { ids: 'all', reboot } : {} });
+    toast(`${install ? 'Installing' : 'Scanning'} on ${r.created} device(s)`);
+    sel.clear();
+    await load();
+  }));
+  await load();
+  every(10000, load);
+}
+
+async function patchApprovalsTab(el) {
+  const sel = new Set();
+  let rows = [], filter = 'pending', q = '';
+  const meta = await api('GET', '/api/patch/meta');
+  const catName = Object.fromEntries(meta.categories);
+  el.innerHTML = `<div class="toolbar"><select id="ap-filter" style="width:auto"><option value="pending">Needs approval</option><option value="approved">Approved</option><option value="denied">Denied</option><option value="">All pending updates</option></select>
+      <select id="ap-cat" style="width:auto"><option value="">All types</option>${meta.categories.map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select>
+      <input type="search" id="ap-q" placeholder="Search title or KB…"><span class="small muted" id="ap-count"></span><span class="grow"></span>
+      ${can('tech') ? `<button class="btn" data-ap="approved" disabled>Approve</button><button class="btn" data-ap="denied" disabled>Deny</button><button class="btn" data-ap="reset" disabled title="Back to the policy's automatic rules">Reset</button>` : ''}</div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr>${can('tech') ? '<th style="width:32px"><input type="checkbox" id="ap-all"></th>' : ''}<th>Update</th><th>Type</th><th>Platform</th>
+      <th class="right">Devices</th><th>Status</th></tr></thead><tbody id="ap-body"></tbody></table></div></div>
+    <p class="small muted">A manual decision applies to every device. Updates without one follow the device's patch policy (automatic approve / deny by type); anything else waits here. Approved updates install in the next maintenance window.</p>`;
+  const status = (u) => (u.manual ? u.manual : u.pending ? 'pending' : u.approved >= u.denied ? 'approved' : 'denied');
+  const visible = () => rows.filter((u) => (!filter || status(u) === filter) && (!$('#ap-cat', el).value || u.category === $('#ap-cat', el).value)
+    && (!q || `${u.title} ${u.kb}`.toLowerCase().includes(q)));
+  const draw = () => {
+    const vis = visible();
+    $('#ap-count', el).textContent = `${vis.length} update(s)`;
+    $('#ap-body', el).innerHTML = vis.slice(0, 1000).map((u) => `<tr>${can('tech') ? `<td><input type="checkbox" data-key="${esc(u.key)}" ${sel.has(u.key) ? 'checked' : ''}></td>` : ''}
+      <td>${esc(u.title)}${u.kb ? ` <span class="small muted mono">${esc(u.kb)}</span>` : ''}${u.severity ? ` ${badge(u.severity, 'bad')}` : ''}</td>
+      <td class="small">${esc(catName[u.category] || u.category)}</td><td>${ICONS[u.platform] ? `<span class="os">${ICONS[u.platform]}</span>` : esc(u.platform)}</td>
+      <td class="right">${u.devices}</td>
+      <td>${u.manual ? approvalBadge(u.manual, 'manual') + (u.decided_by ? ` <span class="small muted">by ${esc(u.decided_by)}</span>` : '')
+    : `${u.approved ? badge(`${u.approved} auto-approved`, 'ok') : ''} ${u.denied ? badge(`${u.denied} auto-denied`, 'bad') : ''} ${u.pending ? badge(`${u.pending} need approval`, 'warn') : ''}`}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="empty">Nothing here</td></tr>';
+    for (const b of $$('[data-ap]', el)) b.disabled = !sel.size;
+    const all = $('#ap-all', el);
+    if (all) all.checked = vis.length > 0 && vis.every((u) => sel.has(u.key));
+  };
+  const load = async () => { rows = await api('GET', '/api/patch/approvals'); draw(); };
+  $('#ap-filter', el).addEventListener('change', (e) => { filter = e.target.value; sel.clear(); draw(); });
+  $('#ap-cat', el).addEventListener('change', draw);
+  $('#ap-q', el).addEventListener('input', (e) => { q = e.target.value.toLowerCase(); draw(); });
+  el.addEventListener('change', (e) => {
+    if (e.target.dataset.key) { e.target.checked ? sel.add(e.target.dataset.key) : sel.delete(e.target.dataset.key); draw(); }
+    if (e.target.id === 'ap-all') { for (const u of visible()) e.target.checked ? sel.add(u.key) : sel.delete(u.key); draw(); }
+  });
+  el.addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-ap]');
+    if (!b) return;
+    const r = await api('POST', '/api/patch/approvals', { keys: [...sel], status: b.dataset.ap });
+    toast(`${r.changed} update(s) ${b.dataset.ap === 'reset' ? 'reset to automatic' : b.dataset.ap}`);
+    sel.clear();
+    await load();
+  }));
+  await load();
+}
+
+async function patchPoliciesTab(el) {
+  const [list, clients, meta] = await Promise.all([api('GET', '/api/patch/policies'), api('GET', '/api/clients'), api('GET', '/api/patch/meta')]);
+  const catName = Object.fromEntries(meta.categories);
+  el.innerHTML = `<div class="row" style="justify-content:space-between;margin-bottom:12px"><p class="small muted" style="margin:0">A device follows the <strong>first</strong> enabled policy in this list that targets it, unless it has its own override (device → Updates tab). Times are in ${esc(meta.timezone)}.</p>
+      ${can('admin') ? '<a class="btn primary" href="#/patching/policies/new">+ New patch policy</a>' : ''}</div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr>${can('admin') ? '<th style="width:70px">Order</th>' : ''}<th>Policy</th><th>Applies to</th><th>Maintenance window</th><th>Reboot</th><th>Automatic approval</th><th class="right">Devices</th></tr></thead><tbody>
+    ${list.map((p, i) => `<tr class="clickable" data-href="#/patching/policies/${p.id}">${can('admin') ? `<td data-stop><button class="btn sm" data-move="${i}" data-dir="-1" ${i ? '' : 'disabled'} aria-label="Move up">▲</button><button class="btn sm" data-move="${i}" data-dir="1" ${i < list.length - 1 ? '' : 'disabled'} aria-label="Move down">▼</button></td>` : ''}
+      <td><strong>${esc(p.name)}</strong> <span class="obj-id">#${p.id}</span>${p.enabled ? '' : ` ${badge('disabled')}`}</td><td class="small">${esc(targetSummary({ ...p.target, platform: p.target.platform }, clients))}</td>
+      <td class="small">${esc(windowText(p))}<div class="muted">${p.window.open ? `open until ${esc(p.window.open_until)}` : `next ${esc(p.window.next_start || '—')}`}</div>
+        ${[p.options.wake && 'Wake-on-LAN', p.options.restore_point && 'restore point', p.options.daytime && `catch-up after ${p.options.min_uptime} min uptime`].filter(Boolean).map((x) => badge(x, 'info')).join(' ')}</td>
+      <td class="small">${esc(REBOOT_TEXT[p.reboot.mode])}${p.reboot.mode === 'notify' ? ` (${p.reboot.delay} min)` : ''}</td>
+      <td class="small">${p.approval.auto_approve.length ? `✓ ${p.approval.auto_approve.map((c) => esc(catName[c])).join(', ')}` : ''}${p.approval.auto_deny.length ? `<div>✗ ${p.approval.auto_deny.map((c) => esc(catName[c])).join(', ')}</div>` : ''}${!p.approval.auto_approve.length && !p.approval.auto_deny.length ? '<span class="muted">manual only</span>' : ''}</td>
+      <td class="right">${p.devices}</td></tr>`).join('') || `<tr><td colspan="7" class="empty">No patch policies yet</td></tr>`}</tbody></table></div></div>`;
+  el.addEventListener('click', guard(async (e) => {
+    const b = e.target.closest('[data-move]');
+    if (!b) return;
+    const ids = list.map((p) => p.id);
+    const i = Number(b.dataset.move), j = i + Number(b.dataset.dir);
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    await api('POST', '/api/patch/policies/order', { ids });
+    router();
+  }));
+}
+
+async function patchPolicyEdit(view, id) {
+  const isNew = id === 'new';
+  const [clients, agents, meta, list] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/agents'), api('GET', '/api/patch/meta'), api('GET', '/api/patch/policies')]);
+  const p = isNew ? { name: '', enabled: true, target: { platform: 'any', clients: [], classes: [], agents: [] }, schedule: { days: [3], start: '03:00', hours: 2 },
+    options: { wake: false, restore_point: true, daytime: true, min_uptime: 20 }, reboot: { mode: 'notify', delay: 15 },
+    approval: { auto_approve: ['security', 'critical', 'definition'], auto_deny: ['driver', 'feature'] } } : list.find((x) => String(x.id) === String(id));
+  if (!p) throw new Error('Patch policy not found');
+  const ro = !can('admin');
+  const chk = (name, val, label, on) => `<label class="check"><input type="checkbox" name="${name}" value="${val}" ${on ? 'checked' : ''} ${ro ? 'disabled' : ''}> ${label}</label>`;
+  const catRadio = (k, l) => {
+    const v = p.approval.auto_approve.includes(k) ? 'approve' : p.approval.auto_deny.includes(k) ? 'deny' : 'manual';
+    return `<tr><td>${esc(l)}</td>${['approve', 'manual', 'deny'].map((o) => `<td class="center"><input type="radio" name="cat-${k}" value="${o}" ${v === o ? 'checked' : ''} ${ro ? 'disabled' : ''} aria-label="${o} ${esc(l)}"></td>`).join('')}</tr>`;
+  };
+  view.innerHTML = `<div class="page-head"><div><a href="#/patching/policies" class="small">← Patch policies</a><h1>${isNew ? 'New patch policy' : esc(p.name)}</h1></div>
+      ${!isNew && can('admin') ? '<button class="btn danger" id="pp-del">Delete</button>' : ''}</div>
+    <form id="pp-form" class="grid cols-2">
+      <div class="card"><h2>General</h2>
+        <div class="field"><label>Name</label><input type="text" name="name" required maxlength="100" value="${esc(p.name)}" ${ro ? 'disabled' : ''} placeholder="e.g. Workstations – Wednesday night"></div>
+        ${chk('enabled', '1', 'Enabled', p.enabled)}
+        <h3 style="margin-top:16px">Applies to</h3>
+        <div class="field"><label>Platform</label><select name="platform" ${ro ? 'disabled' : ''}>${[['any', 'Any'], ['windows', 'Windows'], ['linux', 'Linux'], ['macos', 'macOS']].map(([k, l]) => `<option value="${k}" ${p.target.platform === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="field"><label>Device types (none = all)</label><div class="row">${TARGET_CLASSES.map(([k, l]) => chk('classes', k, l, p.target.classes.includes(k))).join('')}</div></div>
+        <div class="field"><label>Clients (none = all)</label><div class="check-list">${clients.map((c) => chk('clients', c.id, esc(c.name), p.target.clients.includes(c.id))).join('') || '<span class="muted small">No clients</span>'}</div></div>
+        <details ${p.target.agents.length ? 'open' : ''}><summary class="small">Or pick specific devices (overrides the filters above)</summary>
+          <div class="check-list" style="max-height:220px">${agents.map((a) => chk('agents', a.id, `${esc(a.hostname)} <span class="muted small">${esc(a.client_name || '')}</span>`, p.target.agents.includes(a.id))).join('')}</div></details>
+      </div>
+      <div class="card"><h2>Maintenance window</h2>
+        <div class="field"><label>Days</label><div class="row">${DAY_NAMES.map((d, i) => chk('days', i, d, p.schedule.days.includes(i))).join('')}</div></div>
+        <div class="form-grid"><div class="field"><label>Start time (${esc(meta.timezone)})</label><input type="time" name="start" value="${esc(p.schedule.start)}" required ${ro ? 'disabled' : ''}></div>
+          <div class="field"><label>Length (hours)</label><input type="number" name="hours" min="1" max="12" value="${p.schedule.hours}" ${ro ? 'disabled' : ''}></div></div>
+        ${chk('wake', '1', 'Wake sleeping devices with Wake-on-LAN 10 minutes before the window', p.options.wake)}
+        ${chk('restore_point', '1', 'Create a Windows restore point before installing (Windows client editions)', p.options.restore_point)}
+        ${chk('daytime', '1', 'Catch-up patching: if a device was off during the window, patch it once it has been up for', p.options.daytime)}
+        <div class="field" style="margin-left:24px;max-width:200px"><input type="number" name="min_uptime" min="0" max="240" value="${p.options.min_uptime}" ${ro ? 'disabled' : ''} aria-label="Minutes of uptime"><div class="small muted">minutes (gives the user time to get going)</div></div>
+        <h3 style="margin-top:16px">Reboot</h3>
+        <div class="field"><select name="reboot_mode" ${ro ? 'disabled' : ''}>${Object.entries(REBOOT_TEXT).map(([k, l]) => `<option value="${k}" ${p.reboot.mode === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="field"><label>Warning time before the reboot (minutes, for "warn the user")</label><input type="number" name="reboot_delay" min="1" max="240" value="${p.reboot.delay}" ${ro ? 'disabled' : ''}></div>
+        <div class="small muted">Devices only reboot when an installed update needs it.</div>
+      </div>
+      <div class="card" style="grid-column:1/-1"><h2>Automatic approval</h2>
+        <p class="small muted">New updates of each type are approved or denied automatically. "Manual" types wait under Patch manager → Approvals. A manual decision there always wins.</p>
+        <table class="dash" style="max-width:560px"><thead><tr><th>Update type</th><th class="center">Approve</th><th class="center">Manual</th><th class="center">Deny</th></tr></thead>
+        <tbody>${meta.categories.map(([k, l]) => catRadio(k, l)).join('')}</tbody></table></div>
+      ${ro ? '' : '<div style="grid-column:1/-1"><button class="btn primary">Save patch policy</button></div>'}
+    </form>`;
+  $('#pp-form').addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const cats = meta.categories.map(([k]) => [k, f.get(`cat-${k}`)]);
+    const body = {
+      name: f.get('name'), enabled: f.get('enabled') === '1',
+      target: { platform: f.get('platform'), classes: f.getAll('classes'), clients: f.getAll('clients').map(Number), agents: f.getAll('agents') },
+      schedule: { days: f.getAll('days').map(Number), start: f.get('start'), hours: Number(f.get('hours')) },
+      options: { wake: f.get('wake') === '1', restore_point: f.get('restore_point') === '1', daytime: f.get('daytime') === '1', min_uptime: Number(f.get('min_uptime')) },
+      reboot: { mode: f.get('reboot_mode'), delay: Number(f.get('reboot_delay')) },
+      approval: { auto_approve: cats.filter(([, v]) => v === 'approve').map(([k]) => k), auto_deny: cats.filter(([, v]) => v === 'deny').map(([k]) => k) },
+    };
+    const saved = isNew ? await api('POST', '/api/patch/policies', body) : await api('PUT', `/api/patch/policies/${id}`, body);
+    toast('Patch policy saved');
+    location.hash = isNew ? `#/patching/policies/${saved.id}` : '#/patching/policies';
+  }));
+  $('#pp-del')?.addEventListener('click', guard(async () => {
+    if (!await confirmDialog(`Delete the patch policy "${p.name}"? Devices that used it fall through to the next matching policy.`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/patch/policies/${id}`);
+    location.hash = '#/patching/policies';
+  }));
+}
+
+Object.assign(ACTIONS, {
+  'toggle-fav': async () => {
+    const href = favHref();
+    const favs = state.prefs.favorites || [];
+    const on = favs.some((f) => f.href === href);
+    // innerText: visible text only (skips hidden object IDs)
+    const label = (($('#view h1')?.innerText || $('#page-title')?.innerText || 'Page').replace(/\s+/g, ' ').trim()).slice(0, 80);
+    await savePrefs({ favorites: on ? favs.filter((f) => f.href !== href) : [...favs, { href, label }] });
+    renderFavs(); syncFavStar();
+    toast(on ? 'Removed from Favorites' : `★ ${label} added to Favorites`);
+  },
+  palette: () => openPalette(),
+  'new-menu': (el) => popMenu(el, [
+    { label: 'Client', icon: '🏢', run: () => newClientModal() },
+    { label: 'Contact', icon: '👤', run: () => contactModal(null) },
+    { label: 'Script', icon: '📜', href: '#/scripts/new' },
+    { label: 'Policy (configuration baseline)', icon: '🛡', href: '#/policies/new' },
+    ...(can('admin') ? [{ label: 'Patch policy', icon: '🩹', href: '#/patching/policies/new' }] : []),
+    { label: 'Network (discovery)', icon: '🌐', href: '#/network' },
+  ]),
+  bell: (el) => {
+    const seen = bellSeen();
+    popMenu(el, bellItems.length ? [{ html: '<strong>Your commands & scripts</strong> <span class="small muted">(last 24 h)</span>' }, ...bellItems.slice(0, 15).map((j) => ({
+      label: `${j.finished_at > seen ? '● ' : ''}${j.name} — ${j.hostname}`, hint: `${j.status} · ${fmtAgo(j.finished_at)}`, icon: j.status === 'success' ? '✓' : '✗', run: () => openJobModal(j.id),
+    }))] : [{ html: '<div class="muted small">Nothing yet. When a command or script you start finishes, it shows up here.</div>' }]);
+    try { localStorage.setItem(bellKey(), String(Date.now())); } catch { /* storage blocked */ }
+    drawBellBadge();
+  },
+  'user-menu': (el) => popMenu(el, [
+    { html: `<strong>${esc(state.user.username)}</strong> <span class="small muted">${esc(state.user.role)}</span>` },
+    { label: 'Preferences', icon: '⚙', run: () => preferencesModal() },
+    { label: 'Change password', icon: '🔑', href: '#/settings' },
+    '-',
+    { label: 'Sign out', icon: '⎋', run: () => ACTIONS.logout() },
+  ]),
+  'new-contact': (el) => contactModal(null, { clientId: el.dataset.client || null }),
+  'dev-columns': () => columnChooser(),
+});
+
 // ---------------- boot ----------------
 (async () => {
   try {
     state.user = await api('GET', '/api/me');
+    await loadPrefs();
     renderShell();
     router();
   } catch { if (!state.user) renderLogin(); }

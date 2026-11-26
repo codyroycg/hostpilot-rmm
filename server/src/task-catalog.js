@@ -131,7 +131,9 @@ export const TASKS = {
         if (!list.length) throw new HttpError(400, 'No valid updates selected');
         ids = list.join(',');
       }
-      return { ids, reboot: flag(a.reboot) || '0' };
+      // reboot_delay: minutes the user gets (with an on-screen warning) before the restart; restore: Windows restore point first
+      const delay = Math.max(0, Math.min(240, Math.round(Number(a.reboot_delay) || 2)));
+      return { ids, reboot: flag(a.reboot) || '0', reboot_delay: String(delay), restore: flag(a.restore) || '0' };
     },
   },
 
@@ -215,6 +217,8 @@ export const TASKS = {
       return { subnet: need(S(a.subnet, 20), 'Subnet'), community };
     },
   },
+  'roles.detect': { internal: true, title: () => 'Detect server roles', timeout: 300, args: () => ({}) },
+  'screenshot.take': { internal: true, title: () => 'Take a screenshot', timeout: 120, args: (a) => ({ url: S(a.url) }) },
   'net.wake': {
     internal: true, title: (a) => `Wake-on-LAN ${a.label}`.trim(), timeout: 60,
     args: (a) => ({

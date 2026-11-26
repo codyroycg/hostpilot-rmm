@@ -20,7 +20,8 @@ elif command -v needs-restarting >/dev/null 2>&1; then needs-restarting -r >/dev
 fi
 echo "Reboot required: $need_reboot"
 if [ "$need_reboot" = 1 ] && [ "$A_reboot" = 1 ]; then
-  shutdown -r +2 "Rebooting in 2 minutes to finish installing updates (HostPilot)" && echo "Reboot scheduled in 2 minutes."
+  mins="${A_reboot_delay:-2}"; case "$mins" in ''|*[!0-9]*) mins=2 ;; esac
+  shutdown -r +"$mins" "Rebooting in $mins minute(s) to finish installing updates (HostPilot)" && echo "Reboot scheduled in $mins minute(s)."
 fi
 echo "--- remaining updates ---"
 #__INCLUDE:updates.scan.sh__

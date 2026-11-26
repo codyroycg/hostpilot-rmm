@@ -14,6 +14,14 @@ $failed = $false
 if ($coll.Count -eq 0) {
     Write-Output 'Nothing to install.'
 } else {
+    if ($A['restore'] -eq '1') {
+        # System Restore exists on Windows client editions only; servers just skip this
+        try {
+            Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
+            Checkpoint-Computer -Description 'HostPilot: before installing updates' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+            Write-Output 'Restore point created.'
+        } catch { Write-Output "Restore point not created: $($_.Exception.Message)" }
+    }
     Write-Output "Downloading $($coll.Count) update(s)..."
     $dl = $session.CreateUpdateDownloader()
     $dl.Updates = $coll
@@ -30,8 +38,9 @@ if ($coll.Count -eq 0) {
     }
     Write-Output "Reboot required: $($res.RebootRequired)"
     if ($res.RebootRequired -and $A['reboot'] -eq '1') {
-        shutdown.exe /r /t 120 /c "Restarting in 2 minutes to finish installing updates (HostPilot)."
-        Write-Output 'Reboot scheduled in 2 minutes.'
+        $mins = 2; if ($A['reboot_delay']) { $mins = [math]::Max(0, [int]$A['reboot_delay']) }
+        shutdown.exe /r /t ($mins * 60) /c "Your computer will restart in $mins minute(s) to finish installing updates. Please save your work. (HostPilot)"
+        Write-Output "Reboot scheduled in $mins minute(s)."
     }
 }
 Write-Output '--- remaining updates ---'

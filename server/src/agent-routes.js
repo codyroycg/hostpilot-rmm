@@ -14,6 +14,9 @@ import { hostInput, hostOutput, hostClose } from './terminal.js';
 import { liveSample } from './live.js';
 import { chatTokenFor, devicePoll, deviceSend } from './chat.js';
 import { buildPkg } from './pkg.js';
+import { recordCheckinChanges, recordSoftwareChanges } from './history.js';
+import { agentRoles, roleServices } from './roles.js';
+import { receiveShot } from './screenshots.js';
 
 const AGENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 
@@ -162,6 +165,7 @@ route('POST', '/api/agent/checkin', (ctx) => {
     fields.services = JSON.stringify(services);
   }
   const keys = Object.keys(fields).filter((k) => fields[k] !== null);
+  try { recordCheckinChanges(a, fields); } catch (e) { console.error('[history]', e); }
   if (keys.length) {
     run(`UPDATE agents SET ${keys.map((k) => `${k}=?`).join(', ')} WHERE id=?`, ...keys.map((k) => fields[k]), a.id);
   }
@@ -185,24 +189,27 @@ function deviceClass({ chassis, virtual, pcType, platform, os, macModel }) {
   return platform === 'linux' ? 'server' : 'desktop';
 }
 
-const SERVICE_NAME = /^[\w.@:+-]{1,100}$/;
-/** Services this device should report: global list for its platform + its own extra list + policy rules. */
+const SERVICE_NAME = /^[\w.@:+$-]{1,100}$/; // $: SQL Server instances (MSSQL$NAME)
+/** Services this device should report: global list for its platform + its own extra list + policy rules + role packs. */
 export function watchedServices(a) {
   const s = getSettings();
   const list = [s[`watch_services_${a.platform}`], a.watch_services].join(',')
     .split(/[,\s]+/).map((x) => x.trim()).filter((x) => SERVICE_NAME.test(x));
-  return [...new Set([...list, ...policyServicesFor(a)])].slice(0, 50);
+  const roles = [...new Set(agentRoles(a).flatMap((r) => r.services))].filter((x) => roleServices(a).has(x.toLowerCase()));
+  return [...new Set([...list, ...policyServicesFor(a), ...roles])].slice(0, 60);
 }
 
 function evaluateServices(agent, services, watch) {
   const watched = new Set(watch.map((x) => x.toLowerCase()));
+  const roleLevel = roleServices(agent); // role-pack services: 'low' → warning, 'high' → critical
   for (const svc of services) {
-    if (!watched.has(svc.name.toLowerCase())) continue;
-    const type = `service:${svc.name.toLowerCase()}`;
+    const k = svc.name.toLowerCase();
+    if (!watched.has(k)) continue;
+    const type = `service:${k}`;
     const label = svc.display ? `${svc.display} (${svc.name})` : svc.name;
     if (svc.status === 'running') resolveAlert(agent, type, `${label} is running again`);
     else if (svc.status === 'missing') openAlert(agent, type, 'warning', `Monitored service ${label} is not installed`);
-    else openAlert(agent, type, 'critical', `Service ${label} is ${svc.status}`);
+    else openAlert(agent, type, roleLevel.get(k) === 'low' ? 'warning' : 'critical', `Service ${label} is ${svc.status}`);
   }
 }
 
@@ -217,6 +224,7 @@ route('POST', '/api/agent/inventory', (ctx) => {
       return { name, version, publisher };
     });
   }
+  try { recordSoftwareChanges(a.id, sw.slice(0, 20000)); } catch (e) { console.error('[history]', e); }
   tx(() => {
     run('DELETE FROM software WHERE agent_id=?', a.id);
     for (const s of sw.slice(0, 20000)) {
@@ -307,6 +315,9 @@ route('POST', '/api/term/:id/close', (ctx) => hostClose(ctx), { raw: true });
 // Chat from the tray icon (token = this device's chat token; only grants access to its own conversation)
 route('GET', '/api/chat/device/poll', async (ctx) => devicePoll(String(ctx.query.get('token') || ''), clampInt(ctx.query.get('after'), 0, 1e12, 0), clampInt(ctx.query.get('wait'), 0, 30, 0), ctx.res));
 route('POST', '/api/chat/device/send', (ctx) => deviceSend(String(ctx.query.get('token') || ''), ctx.body.author, ctx.body.body));
+
+// Screenshot upload from the device (single-use token created with the request)
+route('PUT', '/api/screenshot-upload/:id', (ctx) => receiveShot(ctx.params.id, ctx.query.get('token'), ctx.req), { raw: true });
 
 // Live performance samples (token in the URL identifies the session)
 route('POST', '/api/live/:id', async (ctx) => sendText(ctx.res, 200, await liveSample(ctx)), { raw: true });
