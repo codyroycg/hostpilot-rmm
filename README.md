@@ -82,6 +82,17 @@ Manual removal: `sudo launchctl bootout system/com.hostpilot.agent; sudo rm -rf 
 - **Agent self-update**: change an agent script on the server and every agent updates itself on its next poll. You can also force an update from the web console (device **Settings → Update agent now**, or **More actions → Update HostPilot agent now** for many devices) or from the device itself (see below).
 - **Windows taskbar icon**: logged-in users see a HostPilot icon showing whether the agent is connected (green), disconnected (red), not running (grey) or updating (blue). Its menu has **Update agent now**. Turn it off under **Settings → Windows taskbar icon**.
 - **Agent uninstall** from the console.
+- **Third-party application patching (Windows)**: the update scan also lists apps with a newer version in **winget** (Chrome, Firefox, 7-Zip, Zoom, VLC, Adobe Reader and thousands more). They appear in the Patch manager as **Third-party applications**, can be approved automatically per patch policy, and install in the maintenance window with `winget upgrade`. On Linux the package manager already updates every installed package.
+- **Monitors with auto-remediation** (Monitors page): a condition checked on a group of devices.
+  - **Conditions**: CPU or memory above X % for N minutes, disk almost full, offline for N minutes, not restarted for N days, restart pending for N hours, service not running, process not running, TCP port not answering, Windows event IDs logged, required software missing, prohibited software installed, or any library script (fails on a non-zero exit code).
+  - **When it fails**: an alert with the monitor's severity, optionally a ticket, and an **automatic fix**: start the stopped service again, or run any library script. A fix runs once per failure, again after 30 minutes if still failing, up to a daily limit. The alert resolves by itself when the check passes.
+  - Ready-made monitors (print spooler, Windows Update service, unexpected shutdowns, pending restarts, servers offline, SSH) are offered on the empty page.
+- **Ticketing** (Tickets page): tickets per client, device and contact with status (new, open, waiting on customer, resolved, closed), priority, assignee, a Markdown conversation and internal notes. Open one from any alert (**🎫 Ticket**), from monitors, automatically for every critical alert (Settings), from the API, or let end users open them in the support portal. Device pages have a **Tickets** tab; the menu badge counts new tickets.
+- **End-user support portal** at `/portal`: give a contact access from their contact card (email + password). They see their devices (online status, model, warranty, pending updates, disk space), open requests, reply, and mark them solved. "Sees everything" contacts see every device and ticket of their company. Turn the portal off under Settings.
+- **IT documentation** (Documentation page): Markdown articles per client (or general), with categories, search, print, and links to related devices. Device pages have a **Docs** tab.
+- **Password vault**: usernames, passwords, URLs and notes per client or device, encrypted on the server with AES-256-GCM. Tech role and up only; every reveal or copy is written to the audit log; a strong-password generator is built in. See `VAULT_KEY` below.
+- **Warranty tracking** (Warranty page and device Overview): purchase date, warranty end date and a note per device, with expired / ending soon / covered / unknown tiles, a **Look up** link to the manufacturer's warranty page for the serial number (Dell, Lenovo, HP, Apple, Microsoft, ASUS, Acer), CSV import (by serial number or hostname) and CSV export. An alert is raised N days before a warranty ends (Settings).
+- **API keys** (user menu → API keys): personal keys for scripts and integrations, `Authorization: Bearer hpk_…`, limited to a role you pick (viewer, tech or admin, never more than your own), with optional expiry and last-used time. Every console action is available through the REST API, for example `GET /api/agents`, `POST /api/tickets`, `POST /api/agents/{id}/task`, `GET /api/alerts`.
 - **Android app for technicians**: the full console in an app (Android 8+), with push-style notifications for new alerts and end-user chat messages, file downloads to the phone's Downloads folder, and uploads from the phone. See [Android app](#android-app).
 
 ## Quick start
@@ -256,8 +267,9 @@ Set environment variables in `.env`:
 | `PORT` | `8080` | |
 | `DATA_DIR` | `/data` | SQLite location |
 | `TRUST_PROXY` | `true` | Honour `X-Forwarded-For` for client IPs |
+| `VAULT_KEY` | generated | Key for the password vault (64 hex characters or any long passphrase). Without it, a key is generated once into `DATA_DIR/vault.key`: **back that file up with the database**, or stored passwords can't be decrypted. |
 
-Thresholds, check-in interval, retention, and the webhook URL are under **Settings** in the UI.
+Thresholds, check-in interval, retention, warranty alerts, the support portal and the webhook URL are under **Settings** in the UI.
 
 ## Scale notes
 
@@ -273,4 +285,4 @@ ADMIN_PASSWORD='change-me-please' npm start
 
 ## Not included (yet)
 
-Remote desktop for Linux *desktops* (X11/Wayland), major OS version upgrades (e.g. Windows 10 → 11, Ubuntu release upgrades), and PSA/ticketing or billing aren't included. Alerts can feed your helpdesk through the webhook.
+Remote desktop for Linux *desktops* (X11/Wayland), major OS version upgrades (e.g. Windows 10 → 11, Ubuntu release upgrades), backup, MDM for phones, automatic warranty lookups through vendor APIs (Dell/Lenovo/HP need API keys; HostPilot links to their warranty pages instead), and billing aren't included. Ticketing is built in; an external PSA can be fed through the webhook or the API.

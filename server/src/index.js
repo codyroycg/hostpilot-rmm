@@ -7,6 +7,8 @@ import { HttpError } from './util.js';
 import './db.js';
 import './agent-routes.js';
 import { sessionUser, ensureAdmin } from './api-routes.js';
+import './extra-routes.js';
+import './portal-routes.js';
 import { startBackgroundTasks } from './tasks.js';
 import { handleUpgrade } from './remote.js';
 import { handleTerminalUpgrade } from './terminal.js';
@@ -27,7 +29,7 @@ const csp = (host) => `default-src 'self'; img-src 'self' data: blob:; style-src
   + `connect-src 'self' ws://${host} wss://${host}; frame-ancestors 'none'`;
 
 function serveStatic(req, res, pathname) {
-  let rel = pathname === '/' ? '/index.html' : pathname;
+  let rel = pathname === '/' ? '/index.html' : pathname === '/portal' || pathname === '/portal/' ? '/portal.html' : pathname;
   let file = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!file.startsWith(PUBLIC_DIR)) return false;
   if (!fs.existsSync(file)) return false;
@@ -60,7 +62,8 @@ const server = http.createServer(async (req, res) => {
     };
     // CSRF defence for cookie-authenticated mutations: JSON bodies, or a custom header on raw uploads
     // (neither can be sent cross-site without a CORS preflight, which we never grant).
-    if (ctx.user && req.method !== 'GET') {
+    // (API-key requests carry no cookie, so they can't be forged cross-site.) The end-user portal gets the same check.
+    if (((ctx.user && !ctx.user.api_key) || pathname.startsWith('/api/portal/')) && req.method !== 'GET') {
       const marked = req.headers['x-hostpilot'] === '1';
       if (m.opts.raw ? !marked : !marked && !String(req.headers['content-type'] || '').includes('application/json')) {
         throw new HttpError(415, 'Expected application/json');

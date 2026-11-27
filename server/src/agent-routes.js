@@ -17,6 +17,7 @@ import { buildPkg } from './pkg.js';
 import { recordCheckinChanges, recordSoftwareChanges } from './history.js';
 import { agentRoles, roleServices } from './roles.js';
 import { receiveShot } from './screenshots.js';
+import { monitorServicesFor } from './monitors.js';
 
 const AGENT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'agents');
 
@@ -174,9 +175,11 @@ route('POST', '/api/agent/checkin', (ctx) => {
   run('INSERT INTO metrics(agent_id, ts, cpu, mem, disk, net_rx, net_tx) VALUES(?,?,?,?,?,?,?)', a.id, now, cpu, mem, diskMax, rxRate, txRate);
   const named = { ...a, hostname: fields.hostname || a.hostname };
   evaluateThresholds(named, disks);
-  const watch = watchedServices({ ...a, ...fields });
-  if (services) evaluateServices(named, services, watch);
-  return { ok: true, checkin_seconds: getSettings().checkin_seconds, watch_services: watch };
+  const merged = { ...a, ...fields };
+  const watch = watchedServices(merged);
+  // "service not running" monitors evaluate their own services (with their own severity and fix)
+  if (services) evaluateServices(named, services, baseWatchedServices(merged));
+  return { ok: true, checkin_seconds: getSettings().checkin_seconds, watch_services: [...new Set([...watch, ...monitorServicesFor(merged)])].slice(0, 80) };
 });
 
 const LAPTOP = new Set([8, 9, 10, 11, 12, 14, 18, 21, 30, 31, 32]);
@@ -191,7 +194,8 @@ function deviceClass({ chassis, virtual, pcType, platform, os, macModel }) {
 
 const SERVICE_NAME = /^[\w.@:+$-]{1,100}$/; // $: SQL Server instances (MSSQL$NAME)
 /** Services this device should report: global list for its platform + its own extra list + policy rules + role packs. */
-export function watchedServices(a) {
+export function watchedServices(a) { return baseWatchedServices(a); }
+function baseWatchedServices(a) {
   const s = getSettings();
   const list = [s[`watch_services_${a.platform}`], a.watch_services].join(',')
     .split(/[,\s]+/).map((x) => x.trim()).filter((x) => SERVICE_NAME.test(x));

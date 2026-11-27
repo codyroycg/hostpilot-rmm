@@ -9,7 +9,7 @@ import { createTerminalSession } from './terminal.js';
 import { startLive, readLive } from './live.js';
 import { normalizeCidr, presentNetDevice, NET_TYPES } from './netmap.js';
 import { ruleCatalog, cleanPolicy, policyTargets } from './policies.js';
-import { runPolicy, queueRoleDetect } from './tasks.js';
+import { runPolicy, queueRoleDetect, checkWarranty } from './tasks.js';
 import { deviceHistory } from './history.js';
 import { createShot, listShots, shotFile, deleteShot } from './screenshots.js';
 import { PACKS, roleDashboard, savePackLevels } from './roles.js';
@@ -38,7 +38,19 @@ function parseCookies(req) {
   return out;
 }
 
+/** API keys ("Authorization: Bearer hpk_…"): act as their owner, capped at the role chosen for the key. */
+function apiKeyUser(tok) {
+  const k = get(`SELECT k.id, k.role AS key_role, k.expires_at, k.last_used, u.id AS uid, u.username, u.role FROM api_keys k
+                 JOIN users u ON u.id=k.user_id WHERE k.token_hash=?`, sha256(tok));
+  if (!k || (k.expires_at && k.expires_at < Date.now())) return null;
+  if (!k.last_used || Date.now() - k.last_used > 60000) run('UPDATE api_keys SET last_used=? WHERE id=?', Date.now(), k.id);
+  const role = ROLE_RANK[k.key_role] && ROLE_RANK[k.key_role] < ROLE_RANK[k.role] ? k.key_role : k.role;
+  return { id: k.uid, username: k.username, role, api_key: k.id };
+}
+
 export function sessionUser(req) {
+  const auth = String(req.headers.authorization || '');
+  if (/^Bearer hpk_[a-f0-9]{40}$/.test(auth)) return apiKeyUser(auth.slice(7));
   const tok = parseCookies(req)[SESSION_COOKIE];
   if (!tok) return null;
   const s = get(`SELECT u.id, u.username, u.role, s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id
@@ -49,7 +61,7 @@ export function sessionUser(req) {
   return { id: s.id, username: s.username, role: s.role };
 }
 
-function need(ctx, role = 'viewer') {
+export function need(ctx, role = 'viewer') {
   const u = ctx.user;
   if (!u) throw new HttpError(401, 'Not signed in');
   if (ROLE_RANK[u.role] < ROLE_RANK[role]) throw new HttpError(403, `Requires ${role} role`);
@@ -151,7 +163,7 @@ const AGENT_SELECT = `SELECT a.*, c.name AS client_name, ct.name AS contact_name
   (SELECT COUNT(*) FROM alerts al WHERE al.agent_id=a.id AND al.status IN ('open','ack')) AS open_alerts
   FROM agents a LEFT JOIN clients c ON c.id=a.client_id LEFT JOIN contacts ct ON ct.id=a.contact_id`;
 
-function loadAgent(id) {
+export function loadAgent(id) {
   const a = get(`${AGENT_SELECT} WHERE a.id=?`, id);
   if (!a) throw new HttpError(404, 'Device not found');
   return a;
@@ -332,7 +344,7 @@ route('GET', '/api/clients/:id', (ctx) => {
   c.tokens = ROLE_RANK[ctx.user.role] >= ROLE_RANK.tech
     ? all('SELECT * FROM enroll_tokens WHERE client_id=? ORDER BY created_at DESC', c.id) : [];
   c.server_url = publicUrl(ctx.req);
-  c.contacts = all('SELECT * FROM contacts WHERE client_id=? ORDER BY name COLLATE NOCASE', c.id);
+  c.contacts = all('SELECT * FROM contacts WHERE client_id=? ORDER BY name COLLATE NOCASE', c.id).map(pubContact);
   return c;
 });
 
@@ -401,6 +413,14 @@ route('PUT', '/api/agents/:id', (ctx) => {
     if (cid && !get('SELECT id FROM contacts WHERE id=?', cid)) throw new HttpError(400, 'Unknown contact');
     run('UPDATE agents SET contact_id=? WHERE id=?', cid, a.id);
   }
+  for (const k of ['warranty_end', 'purchase_date']) {
+    if (b[k] === undefined) continue;
+    const v = b[k] ? String(b[k]).slice(0, 10) : null;
+    if (v && (!/^\d{4}-\d{2}-\d{2}$/.test(v) || !Number.isFinite(Date.parse(v)))) throw new HttpError(400, 'Dates must look like 2027-03-31');
+    run(`UPDATE agents SET ${k}=? WHERE id=?`, v, a.id);
+  }
+  if (b.warranty_note !== undefined) run('UPDATE agents SET warranty_note=? WHERE id=?', String(b.warranty_note || '').slice(0, 300), a.id);
+  if (b.warranty_end !== undefined) checkWarranty(a.id);
   if (b.patch_override !== undefined) {
     const o = b.patch_override === 'none' ? 'none' : b.patch_override ? String(Number(b.patch_override)) : null;
     if (o && o !== 'none' && !get('SELECT id FROM patch_policies WHERE id=?', Number(o))) throw new HttpError(400, 'Unknown patch policy');
@@ -1221,6 +1241,8 @@ route('GET', '/api/search', (ctx) => {
 
 // ---------- contacts (people at a client; a device can be assigned to one) ----------
 
+/** contacts as the console sees them: never the portal password hash */
+export const pubContact = ({ portal_hash, ...c }) => ({ ...c, portal: !!portal_hash, portal_all: !!c.portal_all });
 function cleanContact(b) {
   const name = String(b.name || '').trim().slice(0, 100);
   if (!name) throw new HttpError(400, 'Name is required');
@@ -1232,7 +1254,7 @@ route('GET', '/api/contacts', (ctx) => {
   need(ctx);
   const cid = ctx.query.get('client_id');
   return all(`SELECT ct.*, c.name AS client_name, (SELECT COUNT(*) FROM agents a WHERE a.contact_id=ct.id) AS devices FROM contacts ct
-              LEFT JOIN clients c ON c.id=ct.client_id ${cid ? 'WHERE ct.client_id=?' : ''} ORDER BY ct.name COLLATE NOCASE`, ...(cid ? [Number(cid)] : []));
+              LEFT JOIN clients c ON c.id=ct.client_id ${cid ? 'WHERE ct.client_id=?' : ''} ORDER BY ct.name COLLATE NOCASE`, ...(cid ? [Number(cid)] : [])).map(pubContact);
 });
 route('POST', '/api/contacts', (ctx) => {
   const u = need(ctx, 'tech');
@@ -1241,7 +1263,7 @@ route('POST', '/api/contacts', (ctx) => {
   if (!get('SELECT id FROM clients WHERE id=?', clientId)) throw new HttpError(400, 'Pick a client');
   const r = run('INSERT INTO contacts(client_id, name, email, phone, title, notes, created_at) VALUES(?,?,?,?,?,?,?)', clientId, v.name, v.email, v.phone, v.title, v.notes, Date.now());
   audit(u.username, 'contact.create', v.name);
-  return get('SELECT * FROM contacts WHERE id=?', r.lastInsertRowid);
+  return pubContact(get('SELECT * FROM contacts WHERE id=?', r.lastInsertRowid));
 });
 route('PUT', '/api/contacts/:id', (ctx) => {
   const u = need(ctx, 'tech');
@@ -1250,7 +1272,7 @@ route('PUT', '/api/contacts/:id', (ctx) => {
   const v = cleanContact({ ...c, ...ctx.body });
   run('UPDATE contacts SET name=?, email=?, phone=?, title=?, notes=? WHERE id=?', v.name, v.email, v.phone, v.title, v.notes, c.id);
   audit(u.username, 'contact.update', v.name);
-  return get('SELECT * FROM contacts WHERE id=?', c.id);
+  return pubContact(get('SELECT * FROM contacts WHERE id=?', c.id));
 });
 route('DELETE', '/api/contacts/:id', (ctx) => {
   const u = need(ctx, 'tech');

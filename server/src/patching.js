@@ -9,7 +9,7 @@ import { deviceEvent } from './history.js';
 
 export const CATEGORIES = [
   ['security', 'Security updates'], ['critical', 'Critical updates'], ['definition', 'Definition updates (antivirus)'],
-  ['driver', 'Drivers'], ['feature', 'Feature updates & upgrades'], ['other', 'Other updates'],
+  ['driver', 'Drivers'], ['feature', 'Feature updates & upgrades'], ['apps', 'Third-party applications'], ['other', 'Other updates'],
 ];
 const CAT_IDS = CATEGORIES.map(([c]) => c);
 const PLATFORMS = ['any', 'windows', 'linux', 'macos'];
@@ -20,6 +20,7 @@ const isOnline = (a) => isPolling(a.id) || (a.last_seen && Date.now() - a.last_s
 /** Sorts an update (row of the updates table) into one of CATEGORIES. */
 export function categorize(u) {
   const c = String(u.category || '').toLowerCase(), t = String(u.title || '').toLowerCase(), sev = String(u.severity || '').toLowerCase();
+  if (String(u.uid || '').startsWith('winget:') || c.includes('third-party')) return 'apps';
   if (c.includes('definition') || t.includes('security intelligence') || t.includes('definition update')) return 'definition';
   if (c.includes('driver')) return 'driver';
   if (c.includes('upgrade') || c.includes('feature pack') || t.includes('feature update')) return 'feature';

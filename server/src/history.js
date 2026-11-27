@@ -51,7 +51,7 @@ export function deviceHistory(agent, { limit = 300, before = Date.now() + 1, kin
   }
   if (want('jobs')) {
     for (const j of all(`SELECT id, name, status, created_by, created_at, finished_at, exit_code FROM jobs WHERE agent_id=? AND created_at<?
-                          AND COALESCE(task,'') NOT IN ('metrics.live','terminal.open') AND shell!='_remote' ORDER BY created_at DESC LIMIT ?`, agent.id, before, limit)) {
+                          AND COALESCE(task,'') NOT IN ('metrics.live','terminal.open','monitor.check') AND shell!='_remote' ORDER BY created_at DESC LIMIT ?`, agent.id, before, limit)) {
       items.push({ ts: j.created_at, kind: 'job', text: `${j.name} — ${j.status}${j.created_by ? ` (by ${j.created_by})` : ''}`, job_id: j.id, status: j.status });
     }
   }

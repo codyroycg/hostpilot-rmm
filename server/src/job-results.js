@@ -4,6 +4,7 @@ import { notifyJobDone } from './jobs.js';
 import { ingestScan } from './netmap.js';
 import { ingestPolicyResult } from './policies.js';
 import { ingestRoles } from './roles.js';
+import { ingestMonitorCheck } from './monitors.js';
 
 function parseUpdates(agentId, stdout) {
   const updates = [];
@@ -42,6 +43,7 @@ export function onJobFinished(jobId) {
   if (j.task === 'net.scan') { try { ingestScan(j); } catch (e) { console.error('[netscan]', e); } }
   if (j.task === 'policy.run') { try { ingestPolicyResult(j); } catch (e) { console.error('[policy]', e); } }
   if (j.task === 'roles.detect') { try { ingestRoles(j); } catch (e) { console.error('[roles]', e); } }
+  if (j.task === 'monitor.check') { try { ingestMonitorCheck({ ...j, exit_code: get('SELECT exit_code FROM jobs WHERE id=?', j.id)?.exit_code }); } catch (e) { console.error('[monitor]', e); } }
   if (j.task === 'screenshot.take' && j.status !== 'success') {
     // the device couldn't capture (locked screen, nobody signed in…): fail the waiting request right away
     const url = /screenshot-upload\/([a-f0-9]+)/.exec(String(j.display_body || ''))?.[1];

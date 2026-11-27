@@ -1,33 +1,31 @@
-import { get, run, getSettings } from './db.js';
+import { all, get, run, getSettings } from './db.js';
+import { notify } from './notify.js';
+import { createTicket } from './tickets.js';
 
-async function notify(text, alert) {
-  const { webhook_url } = getSettings();
-  if (!webhook_url) return;
-  try {
-    // "text" works for Slack/Mattermost/Teams-style hooks, "content" for Discord.
-    await fetch(webhook_url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, content: text, alert }),
-      signal: AbortSignal.timeout(10000),
-    });
-  } catch (e) {
-    console.warn('[webhook] delivery failed:', e.message);
-  }
-}
-
-export function openAlert(agent, type, severity, message) {
-  if (agent.maintenance) return;
+/** Opens (or refreshes) an alert. Returns { id, created } or null when the device is in maintenance mode. */
+export function openAlert(agent, type, severity, message, { ticket = false, monitorId = null } = {}) {
+  if (agent.maintenance) return null;
   const existing = get("SELECT id FROM alerts WHERE agent_id=? AND type=? AND status IN ('open','ack')", agent.id, type);
   const t = Date.now();
   if (existing) {
     run('UPDATE alerts SET message=?, severity=?, updated_at=? WHERE id=?', message, severity, t, existing.id);
-    return;
+    return { id: existing.id, created: false };
   }
   const r = run('INSERT INTO alerts(agent_id, type, severity, message, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?)',
     agent.id, type, severity, message, 'open', t, t);
+  const id = Number(r.lastInsertRowid);
   notify(`[${severity.toUpperCase()}] ${agent.hostname}: ${message}`,
-    { id: Number(r.lastInsertRowid), agent_id: agent.id, hostname: agent.hostname, type, severity, message, state: 'open' });
+    { alert: { id, agent_id: agent.id, hostname: agent.hostname, type, severity, message, state: 'open' } });
+  if (ticket || (severity === 'critical' && getSettings().ticket_from_critical)) {
+    try {
+      createTicket({
+        subject: `${agent.hostname}: ${message}`.slice(0, 200), body: `Opened automatically from a ${severity} alert.\n\n${message}`,
+        agent_id: agent.id, client_id: agent.client_id ?? null, priority: severity === 'critical' ? 'high' : 'normal',
+        source: monitorId ? 'monitor' : 'alert', alert_id: id, monitor_id: monitorId, created_by: 'HostPilot',
+      });
+    } catch (e) { console.error('[ticket]', e); }
+  }
+  return { id, created: true };
 }
 
 export function resolveAlert(agent, type, note) {
@@ -36,7 +34,12 @@ export function resolveAlert(agent, type, note) {
   const t = Date.now();
   run("UPDATE alerts SET status='resolved', resolved_at=?, updated_at=? WHERE id=?", t, t, open.id);
   notify(`[RESOLVED] ${agent.hostname}: ${note}`,
-    { id: open.id, agent_id: agent.id, hostname: agent.hostname, type, state: 'resolved' });
+    { alert: { id: open.id, agent_id: agent.id, hostname: agent.hostname, type, state: 'resolved' } });
+  // tickets opened from this alert get a note (they stay open for the technician to close)
+  for (const tk of all("SELECT id FROM tickets WHERE alert_id=? AND status NOT IN ('resolved','closed')", open.id)) {
+    run("INSERT INTO ticket_comments(ticket_id, author, author_kind, body, internal, created_at) VALUES(?,?,?,?,1,?)", tk.id, 'HostPilot', 'system', `The alert cleared: ${note}`, t);
+    run('UPDATE tickets SET updated_at=? WHERE id=?', t, tk.id);
+  }
 }
 
 // Evaluate resource thresholds right after a check-in.

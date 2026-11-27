@@ -161,6 +161,43 @@ addColumn('agents', 'roles_at', 'INTEGER');
 addColumn('agents', 'contact_id', 'INTEGER');
 addColumn('users', 'prefs', 'TEXT');             // JSON: favorites, device list columns, theme, show IDs
 
+// ---- custom monitors & auto-remediation, ticketing, documentation & password vault, end-user portal, API keys, warranty ----
+db.exec(`
+CREATE TABLE IF NOT EXISTS monitors(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER DEFAULT 1, target TEXT, type TEXT NOT NULL, params TEXT,
+  severity TEXT DEFAULT 'warning', actions TEXT, created_by TEXT, created_at INTEGER, updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS monitor_state(
+  monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  state TEXT, since INTEGER, detail TEXT, checked_at INTEGER, job_id TEXT, last_job_at INTEGER, remediated_at INTEGER, remediations INTEGER DEFAULT 0,
+  PRIMARY KEY(monitor_id, agent_id));
+CREATE TABLE IF NOT EXISTS tickets(
+  id INTEGER PRIMARY KEY, client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL, agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL, subject TEXT NOT NULL, status TEXT DEFAULT 'new', priority TEXT DEFAULT 'normal',
+  assignee TEXT, source TEXT DEFAULT 'tech', alert_id INTEGER, monitor_id INTEGER, created_by TEXT, created_at INTEGER, updated_at INTEGER, resolved_at INTEGER);
+CREATE INDEX IF NOT EXISTS tickets_status_idx ON tickets(status, updated_at);
+CREATE TABLE IF NOT EXISTS ticket_comments(
+  id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE, author TEXT, author_kind TEXT DEFAULT 'tech',
+  body TEXT NOT NULL, internal INTEGER DEFAULT 0, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS ticket_comments_idx ON ticket_comments(ticket_id, id);
+CREATE TABLE IF NOT EXISTS doc_articles(
+  id INTEGER PRIMARY KEY, client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE, title TEXT NOT NULL, body TEXT DEFAULT '',
+  category TEXT DEFAULT '', agent_ids TEXT, updated_by TEXT, created_at INTEGER, updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS credentials(
+  id INTEGER PRIMARY KEY, client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE, agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  name TEXT NOT NULL, username TEXT, secret TEXT, url TEXT, notes TEXT, updated_by TEXT, created_at INTEGER, updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS portal_sessions(
+  token_hash TEXT PRIMARY KEY, contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE, expires_at INTEGER);
+CREATE TABLE IF NOT EXISTS api_keys(
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, name TEXT, role TEXT, token_hash TEXT UNIQUE NOT NULL,
+  prefix TEXT, created_at INTEGER, last_used INTEGER, expires_at INTEGER);
+`);
+addColumn('contacts', 'portal_hash', 'TEXT');      // password hash for the end-user portal (null = no portal access)
+addColumn('contacts', 'portal_all', 'INTEGER DEFAULT 0'); // 1 = sees every device and ticket of their client
+addColumn('contacts', 'portal_login', 'INTEGER');
+addColumn('agents', 'warranty_end', 'TEXT');       // YYYY-MM-DD
+addColumn('agents', 'purchase_date', 'TEXT');      // YYYY-MM-DD
+addColumn('agents', 'warranty_note', 'TEXT');
+
 const stmtCache = new Map();
 function stmt(sql) {
   let s = stmtCache.get(sql);
@@ -197,6 +234,9 @@ export const SETTING_DEFAULTS = {
   role_packs: '',      // JSON {packId: 'off'|'low'|'high'} for role monitoring (missing = 'high')
   role_scan_hours: 24, // how often server roles are detected
   patch_timezone: '',  // IANA zone for patch windows (empty = the server's zone)
+  warranty_alert_days: 30, // warn this many days before a device's warranty ends (0 = no warranty alerts)
+  portal_enabled: 1,   // end-user self-service portal at /portal
+  ticket_from_critical: 0, // 1 = every new critical alert opens a ticket automatically
 };
 
 export function getSettings() {

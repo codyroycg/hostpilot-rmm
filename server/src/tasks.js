@@ -1,6 +1,7 @@
 import { all, run, getSettings } from './db.js';
 import { queueJobs, isPolling } from './jobs.js';
-import { openAlert } from './alerts.js';
+import { openAlert, resolveAlert } from './alerts.js';
+import { runMonitors } from './monitors.js';
 import { buildTask } from './task-catalog.js';
 import { policyTargets, buildPolicyScript } from './policies.js';
 import { runPatchWindows } from './patching.js';
@@ -112,6 +113,20 @@ function checkOffline() {
   }
 }
 
+// Warranty: warn N days before a device's warranty ends (dates are entered on the device or the Warranty page).
+export function checkWarranty(onlyId = null) {
+  const { warranty_alert_days } = getSettings();
+  const today = new Date().toISOString().slice(0, 10);
+  if (onlyId) { const a = all('SELECT * FROM agents WHERE id=?', onlyId)[0]; if (a && !a.warranty_end) resolveAlert(a, 'warranty', 'warranty date removed'); }
+  for (const a of all(`SELECT * FROM agents WHERE warranty_end IS NOT NULL AND warranty_end != '' ${onlyId ? 'AND id=?' : ''}`, ...(onlyId ? [onlyId] : []))) {
+    const days = Math.round((Date.parse(a.warranty_end) - Date.parse(today)) / 86400000);
+    if (!Number.isFinite(days)) continue;
+    if (warranty_alert_days && days <= warranty_alert_days) {
+      openAlert(a, 'warranty', days < 0 ? 'warning' : 'info', days < 0 ? `Warranty expired on ${a.warranty_end}` : `Warranty ends in ${days} day(s), on ${a.warranty_end}`);
+    } else resolveAlert(a, 'warranty', `warranty now ends ${a.warranty_end}`);
+  }
+}
+
 function expireJobs() {
   const t = Date.now();
   // results never came back (agent restarted / host rebooted mid-job)
@@ -129,6 +144,7 @@ function prune() {
   run("DELETE FROM jobs WHERE created_at < ? AND status NOT IN ('queued','running')", t - s.job_retention_days * 86400000);
   run("DELETE FROM alerts WHERE status='resolved' AND resolved_at < ?", t - 90 * 86400000);
   run('DELETE FROM sessions WHERE expires_at < ?', t);
+  run('DELETE FROM portal_sessions WHERE expires_at < ?', t);
   run('DELETE FROM audit WHERE ts < ?', t - 365 * 86400000);
   run('DELETE FROM device_events WHERE ts < ?', t - 365 * 86400000);
 }
@@ -152,4 +168,8 @@ export function startBackgroundTasks() {
   setTimeout(safe('roles', autoRoleDetect), 120_000);
   setInterval(() => runPatchWindows().catch((e) => console.error('[task:patch]', e)), 60_000);
   setInterval(safe('screenshots', expireShots), 60_000);
+  setInterval(safe('monitors', runMonitors), 60_000);
+  setTimeout(safe('monitors', runMonitors), 30_000);
+  setInterval(safe('warranty', checkWarranty), 6 * 3600_000);
+  setTimeout(safe('warranty', checkWarranty), 45_000);
 }

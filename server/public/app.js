@@ -187,9 +187,9 @@ function chart(rows, series, { hours = 24, rate = false } = {}) {
 
 // ---------------- layout & routing ----------------
 const NAV = [
-  ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/contacts', 'Contacts'], ['#/alerts', 'Alerts', 'alerts'], ['#/messages', 'Messages', 'chat'],
-  null, ['#/patching', 'Patch manager'], ['#/roles', 'Role monitoring'], ['#/policies', 'Policies'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
-  null, ['#/reports', 'Reports'], ['#/settings', 'Settings'],
+  ['#/', 'Dashboard'], ['#/devices', 'Devices'], ['#/clients', 'Clients'], ['#/contacts', 'Contacts'], ['#/tickets', 'Tickets', 'tickets'], ['#/alerts', 'Alerts', 'alerts'], ['#/messages', 'Messages', 'chat'],
+  null, ['#/patching', 'Patch manager'], ['#/monitors', 'Monitors'], ['#/roles', 'Role monitoring'], ['#/policies', 'Policies'], ['#/scripts', 'Scripts'], ['#/automation', 'Automation'], ['#/jobs', 'Job history'], ['#/software', 'Software'], ['#/network', 'Network'],
+  null, ['#/docs', 'Documentation'], ['#/warranty', 'Warranty'], ['#/reports', 'Reports'], ['#/settings', 'Settings'],
 ];
 
 function renderShell() {
@@ -217,6 +217,8 @@ function renderShell() {
   renderFavs();
   updateAlertBadge();
   setInterval(guard(updateAlertBadge), 30000);
+  guard(updateTicketBadge)();
+  setInterval(guard(updateTicketBadge), 60000);
   startBell();
   // inside the Android app: let it register this phone for alert / chat notifications
   try { window.HostPilotApp?.signedIn(state.user.username); } catch { /* older app */ }
@@ -244,6 +246,12 @@ const ROUTES = [
   [/^#\/roles$/, pageRoles, 'Role monitoring'],
   [/^#\/reports$/, pageReports, 'Reports'],
   [/^#\/contacts$/, pageContacts, 'Contacts'],
+  [/^#\/tickets$/, pageTickets, 'Tickets'],
+  [/^#\/tickets\/(\d+)$/, pageTicket, 'Ticket'],
+  [/^#\/monitors$/, pageMonitors, 'Monitors'],
+  [/^#\/docs\/article\/(\d+)$/, pageDocArticle, 'Article'],
+  [/^#\/docs(?:\/(articles|passwords))?$/, pageDocs, 'Documentation'],
+  [/^#\/warranty$/, pageWarranty, 'Warranty'],
   [/^#\/jobs$/, pageJobs, 'Job history'],
   [/^#\/jobs\/batch\/([\w-]+)$/, pageBatch, 'Job results'],
   [/^#\/alerts$/, pageAlerts, 'Alerts'],
@@ -1330,7 +1338,8 @@ async function pageDevice(view, id, tab = 'overview') {
   const win = a.platform === 'windows';
   const tabs = [['overview', 'Overview'], ['terminal', 'Run command'], ['files', 'Files'], ['tasks', 'Task manager'], ...(win ? [['registry', 'Registry']] : []),
     ['updates', 'Updates'], ['software', 'Software'], ['users', 'Users'], ['hardware', 'Hardware'], ['firewall', 'Firewall'], ['compliance', 'Compliance'],
-    ...(win || a.platform === 'linux' ? [['chat', 'Chat']] : []), ...(win ? [['screenshots', 'Screenshots']] : []), ['history', 'History'], ['jobs', 'Script history'], ['alerts', 'Alerts'], ['settings', 'Settings']];
+    ...(win || a.platform === 'linux' ? [['chat', 'Chat']] : []), ...(win ? [['screenshots', 'Screenshots']] : []), ['history', 'History'], ['jobs', 'Script history'], ['alerts', 'Alerts'],
+    ['tickets', 'Tickets'], ['docs', 'Docs'], ['settings', 'Settings']];
   const term = (shell, label) => `<a class="btn" href="/terminal.html#${encodeURIComponent(a.id)}${shell ? `/${shell}` : ''}" target="_blank" rel="noopener" title="Opens a background session as SYSTEM/root; the signed-in user sees nothing">${label}</a>`;
   view.innerHTML = `
     <div class="page-head"><div>
@@ -1346,7 +1355,7 @@ async function pageDevice(view, id, tab = 'overview') {
   const fn = {
     overview: devOverview, terminal: devTerminal, files: devFiles, updates: devUpdates, software: devSoftware, users: devUsers,
     hardware: devHardware, firewall: devFirewall, tasks: devTaskManager, registry: devRegistry, compliance: devCompliance, chat: devChat,
-    jobs: devJobs, alerts: devAlerts, settings: devSettings, history: devHistory, screenshots: devScreenshots,
+    jobs: devJobs, alerts: devAlerts, settings: devSettings, history: devHistory, screenshots: devScreenshots, tickets: devTickets, docs: devDocs,
   }[tab] || devOverview;
   await fn(el, a);
 }
@@ -2239,7 +2248,7 @@ function alertsTable(alerts, { showHost = true } = {}) {
       ${showHost ? `<td><a href="#/devices/${al.agent_id}">${esc(al.hostname)}</a></td><td class="small">${esc(al.client_name || '—')}</td>` : ''}
       <td>${esc(al.type)}</td><td>${esc(al.message)}</td><td>${badge(al.status)}</td>
       <td class="small nowrap" title="${fmtDate(al.created_at)}">${fmtAgo(al.created_at)}${al.resolved_at ? `<div class="muted">resolved ${fmtAgo(al.resolved_at)}</div>` : ''}</td>
-      <td class="right nowrap">${can('tech') && al.status === 'open' ? `<button class="btn sm" data-action="alert" data-op="ack" data-id="${al.id}">Ack</button> ` : ''}${can('tech') && al.status !== 'resolved' ? `<button class="btn sm" data-action="alert" data-op="resolve" data-id="${al.id}">Resolve</button>` : ''}</td></tr>`).join('')
+      <td class="right nowrap">${can('tech') && al.status === 'open' ? `<button class="btn sm" data-action="alert" data-op="ack" data-id="${al.id}">Ack</button> ` : ''}${can('tech') && al.status !== 'resolved' ? `<button class="btn sm" data-action="alert" data-op="resolve" data-id="${al.id}">Resolve</button>` : ''}${can('tech') ? ` <button class="btn sm" data-action="alert-ticket" data-id="${al.id}" title="Open a ticket for this alert (or go to its ticket)">🎫 Ticket</button>` : ''}</td></tr>`).join('')
       || `<tr><td colspan="8" class="empty">No alerts</td></tr>`}</tbody></table></div></div>`;
 }
 
@@ -2663,6 +2672,10 @@ async function pageSettings(view) {
       <div class="form-grid">${num('role_scan_hours', 'Role detection (hours)', 'How often server roles are detected; 0 disables')}
         <div class="field"><label>Patch window time zone</label><input name="patch_timezone" type="text" value="${esc(s.patch_timezone)}" placeholder="${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}">
           <div class="small muted">IANA name, e.g. America/Chicago. Empty = the server's zone.</div></div></div>
+      <div class="form-grid">${num('warranty_alert_days', 'Warranty alert (days before)', 'Alert this many days before a warranty ends; 0 disables')}
+        <div class="field"><label>Tickets from critical alerts</label><select name="ticket_from_critical"><option value="0" ${s.ticket_from_critical ? '' : 'selected'}>No, only when asked</option><option value="1" ${s.ticket_from_critical ? 'selected' : ''}>Open a ticket for every critical alert</option></select></div>
+        <div class="field"><label>End-user support portal</label><select name="portal_enabled"><option value="1" ${s.portal_enabled ? 'selected' : ''}>On (${esc(location.origin)}/portal)</option><option value="0" ${s.portal_enabled ? '' : 'selected'}>Off</option></select>
+          <div class="small muted">Give contacts access on the Contacts page.</div></div></div>
       <div class="field"><label>Alert webhook URL</label><input name="webhook_url" type="url" value="${esc(s.webhook_url)}" placeholder="https://hooks.slack.com/… or Discord / Teams / ntfy webhook"></div>
       <div class="row"><button class="btn primary">Save settings</button><button type="button" class="btn" data-action="test-webhook">Send test</button></div>
       <p class="small muted">Current agent versions: Windows <span class="mono">${cfg.agent_versions.windows}</span>, Linux <span class="mono">${cfg.agent_versions.linux}</span>. Agents self-update when these change.</p></form>` : ''}
@@ -3105,9 +3118,11 @@ async function contactModal(c, { clientId = null, onSaved = () => router() } = {
       <div class="field"><label>Email</label><input name="email" type="email" maxlength="200" value="${esc(v.email || '')}"></div>
       <div class="field"><label>Phone</label><input type="text" name="phone" maxlength="50" value="${esc(v.phone || '')}"></div>
       <div class="field"><label>Job title</label><input type="text" name="title" maxlength="100" value="${esc(v.title || '')}"></div></div>
-      <div class="field"><label>Notes</label><textarea name="notes" maxlength="2000">${esc(v.notes || '')}</textarea></div></form>`,
-  { foot: `${c ? '<button class="btn danger" id="ct-del">Delete</button><span class="grow"></span>' : ''}<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="ct-form">Save</button>` });
+      <div class="field"><label>Notes</label><textarea name="notes" maxlength="2000">${esc(v.notes || '')}</textarea></div></form>
+      ${portalSection(c)}`,
+  { wide: !!c, foot: `${c ? '<button class="btn danger" id="ct-del">Delete</button><span class="grow"></span>' : ''}<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="ct-form">Save</button>` });
   if (!clients.length) { $('#ct-form', m).innerHTML = '<p>Create a client first.</p>'; return; }
+  bindPortalSection(m, c, onSaved);
   $('#ct-form', m).addEventListener('submit', guard(async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target));
@@ -3119,7 +3134,7 @@ async function contactModal(c, { clientId = null, onSaved = () => router() } = {
     await api('DELETE', `/api/contacts/${c.id}`); toast('Contact deleted'); onSaved();
   }));
 }
-const contactRows = (list, showClient) => list.map((c) => `<tr class="clickable" data-contact="${c.id}"><td><strong>${esc(c.name)}</strong>${c.title ? `<div class="small muted">${esc(c.title)}</div>` : ''}</td>
+const contactRows = (list, showClient) => list.map((c) => `<tr class="clickable" data-contact="${c.id}"><td><strong>${esc(c.name)}</strong>${c.portal ? ' <span class="badge info" title="Can sign in to the support portal">portal</span>' : ''}${c.title ? `<div class="small muted">${esc(c.title)}</div>` : ''}</td>
   ${showClient ? `<td>${esc(c.client_name || '')}</td>` : ''}<td>${c.email ? `<a href="mailto:${esc(c.email)}" data-stop>${esc(c.email)}</a>` : ''}</td><td>${esc(c.phone || '')}</td>
   <td class="right">${c.devices ?? ''}</td></tr>`).join('');
 async function pageContacts(view) {
@@ -3298,7 +3313,14 @@ async function devAssignCard(a) {
     <dt>Patch policy</dt><dd>${p ? `<a href="#/patching/policies/${p.id}">${esc(p.name)}</a>${patch.source === 'override' ? ` ${badge('override', 'warn')}` : ''}
       <div class="small muted">${p.window.open ? `Window open until ${esc(p.window.open_until)}` : p.window.next_start ? `Next window ${esc(p.window.next_start)}` : ''}</div>`
     : patch.source === 'override-none' ? `${badge('patching disabled', 'warn')} <span class="small muted">(override)</span>` : '<span class="muted">none</span>'}</dd>
+    <dt>Warranty</dt><dd>${a.warranty_end ? (() => { const days = Math.round((Date.parse(a.warranty_end) - Date.parse(new Date().toISOString().slice(0, 10))) / 86400000);
+      return `${esc(a.warranty_end)} ${days < 0 ? badge('expired', 'bad') : days <= 90 ? badge(`${days} days left`, 'warn') : ''}`; })() : '<span class="muted">unknown</span>'}
+      ${a.purchase_date ? `<div class="small muted">purchased ${esc(a.purchase_date)}</div>` : ''}${can('tech') ? ' <button class="btn sm" id="ov-warranty">Edit</button>' : ''}</dd>
   </dl>`;
+  $('#ov-warranty')?.addEventListener('click', guard(async () => {
+    const w = (await api('GET', '/api/warranty')).find((x) => x.id === a.id);
+    warrantyModal(w, () => router());
+  }));
   $('#ov-contact')?.addEventListener('change', guard(async (e) => {
     await api('PUT', `/api/agents/${a.id}`, { contact_id: e.target.value || null });
     toast('Contact assigned');
@@ -3560,6 +3582,11 @@ Object.assign(ACTIONS, {
   },
   palette: () => openPalette(),
   'new-menu': (el) => popMenu(el, [
+    { label: 'Ticket', icon: '🎫', run: () => newTicketModal() },
+    { label: 'Documentation article', icon: '📄', run: () => articleModal(null) },
+    { label: 'Password', icon: '🔑', run: () => credentialModal(null) },
+    ...(can('admin') ? [{ label: 'Monitor', icon: '📡', href: '#/monitors' }] : []),
+    '-',
     { label: 'Client', icon: '🏢', run: () => newClientModal() },
     { label: 'Contact', icon: '👤', run: () => contactModal(null) },
     { label: 'Script', icon: '📜', href: '#/scripts/new' },
@@ -3579,11 +3606,657 @@ Object.assign(ACTIONS, {
     { html: `<strong>${esc(state.user.username)}</strong> <span class="small muted">${esc(state.user.role)}</span>` },
     { label: 'Preferences', icon: '⚙', run: () => preferencesModal() },
     { label: 'Change password', icon: '🔑', href: '#/settings' },
+    { label: 'API keys', icon: '🗝', run: () => apiKeysModal() },
     '-',
     { label: 'Sign out', icon: '⎋', run: () => ACTIONS.logout() },
   ]),
   'new-contact': (el) => contactModal(null, { clientId: el.dataset.client || null }),
   'dev-columns': () => columnChooser(),
+});
+
+// ---------------- small markdown renderer (documentation, ticket text) ----------------
+/** Escapes first, then turns a safe subset of Markdown into HTML: headings, lists, checklists, quotes, code, bold/italic, links. */
+function mdRender(src) {
+  const inline = (s) => esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|#\/)[^\s)]+)\)/g, (_, t, u) => `<a href="${u}" ${u.startsWith('#') ? '' : 'target="_blank" rel="noopener"'}>${t}</a>`)
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  const out = [];
+  let list = null, para = [], code = null;
+  const flush = () => {
+    if (para.length) { out.push(`<p>${para.map(inline).join('<br>')}</p>`); para = []; }
+    if (list) { out.push(`<${list.tag}>${list.items.join('')}</${list.tag}>`); list = null; }
+  };
+  for (const line of String(src || '').replace(/\r\n/g, '\n').split('\n')) {
+    if (code) { if (/^```/.test(line)) { out.push(`<pre>${esc(code.join('\n'))}</pre>`); code = null; } else code.push(line); continue; }
+    if (/^```/.test(line)) { flush(); code = []; continue; }
+    let m;
+    if ((m = /^(#{1,4})\s+(.*)$/.exec(line))) { flush(); const n = Math.min(4, m[1].length + 1); out.push(`<h${n}>${inline(m[2])}</h${n}>`); continue; }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { flush(); out.push('<hr>'); continue; }
+    if ((m = /^>\s?(.*)$/.exec(line))) { flush(); out.push(`<blockquote>${inline(m[1])}</blockquote>`); continue; }
+    if ((m = /^\s*([-*]|\d+[.)])\s+(.*)$/.exec(line))) {
+      if (para.length) flush();
+      const tag = /\d/.test(m[1]) ? 'ol' : 'ul';
+      if (!list || list.tag !== tag) { flush(); list = { tag, items: [] }; }
+      const ck = /^\[( |x)\]\s+(.*)$/i.exec(m[2]);
+      list.items.push(ck ? `<li class="ck">${ck[1].trim() ? '☑' : '☐'} ${inline(ck[2])}</li>` : `<li>${inline(m[2])}</li>`);
+      continue;
+    }
+    if (!line.trim()) { flush(); continue; }
+    if (list) flush();
+    para.push(line);
+  }
+  if (code) out.push(`<pre>${esc(code.join('\n'))}</pre>`);
+  flush();
+  return out.join('');
+}
+
+// ---------------- ticketing ----------------
+const T_STATUS = { new: ['New', 'info'], open: ['Open', 'warn'], pending: ['Waiting on customer', ''], resolved: ['Resolved', 'ok'], closed: ['Closed', ''] };
+const T_PRIO = { urgent: ['Urgent', 'bad'], high: ['High', 'warn'], normal: ['Normal', ''], low: ['Low', ''] };
+const T_SOURCE = { tech: 'Technician', alert: 'Alert', monitor: 'Monitor', portal: 'Support portal' };
+const tStatus = (s) => badge(...(T_STATUS[s] || [s, '']));
+const tPrio = (p) => badge(...(T_PRIO[p] || [p, '']));
+let ticketMeta = null;
+const loadTicketMeta = async () => (ticketMeta = await api('GET', '/api/tickets/meta'));
+
+async function updateTicketBadge() {
+  if (!state.user) return;
+  const m = await loadTicketMeta();
+  const b = $('#nav-tickets');
+  if (!b) return;
+  const n = m.counts.new;
+  b.textContent = n; b.classList.toggle('hidden', !n);
+  b.title = `${m.counts.new} new · ${m.counts.unassigned} unassigned · ${m.counts.mine} assigned to you`;
+}
+
+function ticketRows(list, { showClient = true } = {}) {
+  return list.map((t) => `<tr class="clickable" data-href="#/tickets/${t.id}"><td class="mono small nowrap">#${t.id}</td>
+    <td><strong>${esc(t.subject)}</strong><div class="small muted">${[t.hostname ? `🖥 ${esc(t.hostname)}` : '', t.contact_name ? `👤 ${esc(t.contact_name)}` : '', T_SOURCE[t.source] && t.source !== 'tech' ? esc(T_SOURCE[t.source]) : '', t.comments ? `💬 ${t.comments}` : ''].filter(Boolean).join(' · ')}</div></td>
+    ${showClient ? `<td class="small">${esc(t.client_name || '—')}</td>` : ''}<td>${tStatus(t.status)}${t.last_customer_reply && t.last_customer_reply >= t.updated_at - 1000 && ['open', 'pending'].includes(t.status) ? ' <span class="badge info">customer replied</span>' : ''}</td>
+    <td>${tPrio(t.priority)}</td><td class="small">${esc(t.assignee || '—')}</td><td class="small nowrap" title="${fmtDate(t.updated_at)}">${fmtAgo(t.updated_at)}</td></tr>`).join('');
+}
+const TICKET_HEAD = (showClient = true) => `<thead><tr><th>#</th><th>Subject</th>${showClient ? '<th>Client</th>' : ''}<th>Status</th><th>Priority</th><th>Assigned</th><th>Updated</th></tr></thead>`;
+
+async function pageTickets(view) {
+  const [meta, clients] = await Promise.all([loadTicketMeta(), api('GET', '/api/clients')]);
+  const f = state.ticketFilter || (state.ticketFilter = { status: 'active', assignee: '', client_id: '', q: '' });
+  view.innerHTML = `<div class="page-head"><div><h1>Tickets</h1><div class="small muted">${meta.counts.active} active · ${meta.counts.new} new · ${meta.counts.unassigned} unassigned · ${meta.counts.mine} assigned to you</div></div>
+      ${can('tech') ? '<button class="btn primary" data-action="new-ticket">+ New ticket</button>' : ''}</div>
+    <div class="toolbar">
+      <select id="tk-status" style="width:auto"><option value="active">Active (new, open, waiting)</option>${meta.statuses.map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}<option value="all">All</option></select>
+      <select id="tk-assignee" style="width:auto"><option value="">Anyone</option><option value="me">Assigned to me</option><option value="-">Unassigned</option>${meta.technicians.map((u) => `<option value="${esc(u)}">${esc(u)}</option>`).join('')}</select>
+      <select id="tk-client" style="width:auto"><option value="">All clients</option>${clients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
+      <input type="search" id="tk-q" placeholder="Search subject, #number, device…"></div>
+    <div class="card flush"><div class="table-wrap"><table>${TICKET_HEAD()}<tbody id="tk-body"></tbody></table></div></div>
+    <p class="small muted">Tickets are opened by technicians, from alerts (Alerts → Ticket), by monitors set to open tickets, and by end users in the <a href="/portal" target="_blank" rel="noopener">support portal</a>.</p>`;
+  $('#tk-status').value = f.status; $('#tk-assignee').value = f.assignee; $('#tk-client').value = f.client_id; $('#tk-q').value = f.q;
+  const draw = async () => {
+    Object.assign(f, { status: $('#tk-status').value, assignee: $('#tk-assignee').value, client_id: $('#tk-client').value, q: $('#tk-q').value.trim() });
+    const qs = new URLSearchParams(Object.entries(f).filter(([, v]) => v));
+    const list = await api('GET', `/api/tickets?${qs}`);
+    if (!$('#tk-body')) return;
+    $('#tk-body').innerHTML = ticketRows(list) || '<tr><td colspan="7" class="empty">No tickets</td></tr>';
+  };
+  let t;
+  ['tk-status', 'tk-assignee', 'tk-client'].forEach((id) => $(`#${id}`).addEventListener('change', guard(draw)));
+  $('#tk-q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(guard(draw), 250); });
+  await draw();
+  every(30000, draw);
+}
+
+async function newTicketModal({ agentId = null, clientId = null, subject = '' } = {}) {
+  const [clients, agents, meta] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/agents'), ticketMeta ? Promise.resolve(ticketMeta) : loadTicketMeta()]);
+  const ag = agentId ? agents.find((a) => a.id === agentId) : null;
+  const cid = ag?.client_id || clientId || '';
+  const m = openModal('New ticket', `<form id="nt-form">
+      <div class="field"><label>Subject</label><input type="text" name="subject" required maxlength="200" value="${esc(subject)}" placeholder="e.g. Outlook keeps asking for the password"></div>
+      <div class="form-grid">
+        <div class="field"><label>Client</label><select name="client_id" id="nt-client"><option value="">— none —</option>${clients.map((c) => `<option value="${c.id}" ${String(c.id) === String(cid) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Device</label><select name="agent_id" id="nt-agent"></select></div>
+        <div class="field"><label>Contact</label><select name="contact_id" id="nt-contact"></select></div>
+        <div class="field"><label>Priority</label><select name="priority">${meta.priorities.map(([k, l]) => `<option value="${k}" ${k === 'normal' ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+        <div class="field"><label>Assign to</label><select name="assignee"><option value="">— nobody —</option>${meta.technicians.map((u) => `<option value="${esc(u)}" ${u === state.user.username ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select></div></div>
+      <div class="field"><label>Description</label><textarea name="body" rows="6" maxlength="20000" placeholder="What's wrong, what has been tried, who is affected…"></textarea></div></form>`,
+  { wide: true, foot: '<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="nt-form">Create ticket</button>' });
+  const fill = async () => {
+    const c = $('#nt-client', m).value;
+    const devs = agents.filter((a) => !c || String(a.client_id) === c);
+    $('#nt-agent', m).innerHTML = `<option value="">— none —</option>${devs.map((a) => `<option value="${a.id}" ${a.id === agentId ? 'selected' : ''}>${esc(a.hostname)}</option>`).join('')}`;
+    const contacts = c ? await api('GET', `/api/contacts?client_id=${c}`) : [];
+    $('#nt-contact', m).innerHTML = `<option value="">— none —</option>${contacts.map((x) => `<option value="${x.id}" ${ag && x.id === ag.contact_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}`;
+  };
+  $('#nt-client', m).addEventListener('change', guard(fill));
+  await fill();
+  $('#nt-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const t = await api('POST', '/api/tickets', Object.fromEntries(new FormData(e.target)));
+    closeModal(); toast(`Ticket #${t.id} created`); updateTicketBadge().catch(() => {});
+    location.hash = `#/tickets/${t.id}`;
+  }));
+}
+
+async function pageTicket(view, id) {
+  const [t, meta] = await Promise.all([api('GET', `/api/tickets/${id}`), loadTicketMeta()]);
+  $('#page-title').textContent = `Ticket #${t.id}`;
+  const tech = can('tech');
+  const sel = (name, opts, cur) => `<select data-tf="${name}" ${tech ? '' : 'disabled'} style="width:100%">${opts.map(([k, l]) => `<option value="${esc(k)}" ${String(k) === String(cur ?? '') ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+  const msg = (c) => `<div class="tk-msg ${c.author_kind}${c.internal ? ' internal' : ''}">
+      <div class="tk-meta"><strong>${esc(c.author || '')}</strong>${c.author_kind === 'contact' ? ' <span class="badge info">customer</span>' : ''}${c.internal && c.author_kind !== 'system' ? ' <span class="badge warn">internal note</span>' : ''}
+        <span class="muted small" title="${fmtDate(c.created_at)}">${fmtAgo(c.created_at)}</span></div>
+      ${c.author_kind === 'system' ? `<div class="small muted">${esc(c.body)}</div>` : `<div class="md">${mdRender(c.body)}</div>`}</div>`;
+  view.innerHTML = `<div class="page-head"><div><div class="small"><a href="#/tickets">← Tickets</a></div>
+      <h1>#${t.id} ${esc(t.subject)}</h1><div class="small muted" style="margin-top:4px">${tStatus(t.status)} ${tPrio(t.priority)} · opened ${fmtAgo(t.created_at)} by ${esc(t.created_by || '?')} · ${esc(T_SOURCE[t.source] || t.source)}</div></div>
+      <div class="row">${tech && t.status !== 'resolved' && t.status !== 'closed' ? '<button class="btn" data-tk="resolve">✓ Resolve</button>' : ''}${tech && ['resolved', 'closed'].includes(t.status) ? '<button class="btn" data-tk="reopen">Reopen</button>' : ''}
+        ${can('admin') ? '<button class="btn danger" data-tk="delete">Delete</button>' : ''}</div></div>
+    <div class="tk-layout">
+      <div class="card"><div class="tk-thread">${t.thread.map(msg).join('') || '<div class="muted">No messages yet.</div>'}</div>
+        ${tech ? `<form id="tk-reply" class="tk-reply"><textarea name="body" rows="4" maxlength="20000" placeholder="Write a reply… (Markdown: **bold**, lists, \`code\`)" required></textarea>
+          <div class="row"><label class="check"><input type="checkbox" name="internal"> Internal note (the customer doesn't see it)</label><span class="grow"></span>
+            <select name="status" style="width:auto"><option value="">Keep status</option><option value="pending">…and wait on customer</option><option value="resolved">…and resolve</option></select>
+            <button class="btn primary">Send</button></div></form>` : ''}</div>
+      <div class="card"><h3>Details</h3>
+        <div class="field"><label>Status</label>${sel('status', meta.statuses, t.status)}</div>
+        <div class="field"><label>Priority</label>${sel('priority', meta.priorities, t.priority)}</div>
+        <div class="field"><label>Assigned to</label>${sel('assignee', [['', '— nobody —'], ...meta.technicians.map((u) => [u, u])], t.assignee)}</div>
+        <dl class="kv">
+          <dt>Client</dt><dd>${t.client_id ? `<a href="#/clients/${t.client_id}">${esc(t.client_name)}</a>` : '—'}</dd>
+          <dt>Device</dt><dd>${t.agent_id ? `<a href="#/devices/${t.agent_id}">${esc(t.hostname || t.agent_id)}</a>` : '—'}</dd>
+          <dt>Contact</dt><dd>${t.contact_name ? `${esc(t.contact_name)}${t.contact_email ? `<div class="small"><a href="mailto:${esc(t.contact_email)}?subject=${encodeURIComponent(`[Ticket #${t.id}] ${t.subject}`)}">${esc(t.contact_email)}</a></div>` : ''}` : '—'}</dd>
+          ${t.alert_id ? `<dt>Alert</dt><dd><a href="#/alerts">Alert ${t.alert_id}</a></dd>` : ''}
+          ${t.monitor_id ? `<dt>Monitor</dt><dd><a href="#/monitors">Monitor ${t.monitor_id}</a></dd>` : ''}
+          <dt>Updated</dt><dd>${fmtDate(t.updated_at)}</dd>${t.resolved_at ? `<dt>Resolved</dt><dd>${fmtDate(t.resolved_at)}</dd>` : ''}
+        </dl>
+        ${t.agent_id && tech ? `<div class="row" style="margin-top:12px"><a class="btn sm" href="#/devices/${t.agent_id}">Open device</a><a class="btn sm" href="#/devices/${t.agent_id}/history">History</a><a class="btn sm" href="#/devices/${t.agent_id}/docs">Docs & passwords</a></div>` : ''}</div>
+    </div>`;
+  const thread = $('.tk-thread', view);
+  thread.scrollTop = thread.scrollHeight;
+  view.addEventListener('change', guard(async (e) => {
+    const k = e.target.dataset.tf;
+    if (!k) return;
+    await api('PUT', `/api/tickets/${t.id}`, { [k]: e.target.value || null });
+    toast('Ticket updated'); updateTicketBadge().catch(() => {}); router();
+  }), { signal: state.pageAbort.signal });
+  view.addEventListener('click', guard(async (e) => {
+    const op = e.target.closest('[data-tk]')?.dataset.tk;
+    if (op === 'resolve' || op === 'reopen') { await api('PUT', `/api/tickets/${t.id}`, { status: op === 'resolve' ? 'resolved' : 'open' }); updateTicketBadge().catch(() => {}); router(); }
+    if (op === 'delete' && await confirmDialog(`Delete ticket #${t.id} and its whole conversation? This can't be undone.`, { okLabel: 'Delete', danger: true })) {
+      await api('DELETE', `/api/tickets/${t.id}`); toast('Ticket deleted'); location.hash = '#/tickets';
+    }
+  }), { signal: state.pageAbort.signal });
+  $('#tk-reply')?.addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    await api('POST', `/api/tickets/${t.id}/comments`, { body: f.get('body'), internal: !!f.get('internal'), status: f.get('status') || undefined });
+    toast(f.get('internal') ? 'Note added' : 'Reply sent'); router();
+  }));
+}
+
+async function devTickets(el, a) {
+  const list = await api('GET', `/api/tickets?status=all&agent_id=${encodeURIComponent(a.id)}`);
+  el.innerHTML = `<div class="row" style="justify-content:space-between;margin-bottom:12px"><span class="small muted">${list.length} ticket(s) for this device</span>
+      ${can('tech') ? `<button class="btn primary" data-action="new-ticket" data-agent="${a.id}">+ New ticket</button>` : ''}</div>
+    <div class="card flush"><div class="table-wrap"><table>${TICKET_HEAD(false)}<tbody>${ticketRows(list, { showClient: false }) || '<tr><td colspan="6" class="empty">No tickets for this device</td></tr>'}</tbody></table></div></div>`;
+}
+
+// ---------------- custom monitors & auto-remediation ----------------
+const MON_STATE = { fail: ['Failing', 'bad'], ok: ['OK', 'ok'], pending: ['Pending', 'warn'], waiting: ['Waiting for data', 'info'] };
+function monitorSummary(m, types) {
+  const t = types[m.type];
+  const p = m.params;
+  const bits = {
+    cpu: `above ${p.threshold}% for ${p.minutes} min`, memory: `above ${p.threshold}% for ${p.minutes} min`, disk: `${p.mount || 'any drive'} above ${p.threshold}%`,
+    offline: `offline > ${p.minutes} min`, uptime: `up > ${p.days} days`, reboot_pending: `pending > ${p.hours} h`, service: p.name, process: `${p.name}, every ${p.interval} min`,
+    port: `${p.host}:${p.port}, every ${p.interval} min`, event_log: `${p.log} IDs ${p.ids} in ${p.minutes} min`, software_missing: `"${p.name}"`, software_present: `"${p.name}"`,
+    script: `every ${p.interval} min`,
+  }[m.type] || '';
+  return `${esc(t?.label || m.type)}${bits ? `: <span class="mono small">${esc(bits)}</span>` : ''}`;
+}
+function monTargetSummary(t, clients) {
+  if (t.agents?.length) return `${t.agents.length} selected device(s)`;
+  const parts = [t.platform && t.platform !== 'any' ? PLATFORM_NAME[t.platform] : 'All platforms'];
+  if (t.classes?.length) parts.push(t.classes.map((c) => (CLASS_INFO[c] || [c])[0].toLowerCase() + 's').join(', '));
+  if (t.clients?.length) parts.push(t.clients.map((id) => clients.find((c) => c.id === id)?.name || `#${id}`).join(', '));
+  return parts.join(' · ');
+}
+
+async function pageMonitors(view) {
+  const open = new Set(state.monOpen || []);
+  const clients = await api('GET', '/api/clients');
+  const draw = async () => {
+    const d = await api('GET', '/api/monitors');
+    if (!view.isConnected) return;
+    const failing = d.monitors.reduce((n, m) => n + m.failing, 0);
+    view.innerHTML = `<div class="page-head"><div><h1>Monitors</h1>
+        <div class="small muted">Conditions checked on groups of devices. When one fails HostPilot raises an alert, can open a ticket and can fix it automatically (restart the service or run a script).</div></div>
+        ${can('admin') ? '<button class="btn primary" data-mon="new">+ New monitor</button>' : ''}</div>
+      <div class="tiles"><div class="tile"><div class="l">Monitors</div><div class="v">${d.monitors.length}</div></div>
+        <div class="tile ${failing ? 'bad' : 'ok'}"><div class="l">Failing checks</div><div class="v">${failing}</div></div>
+        <div class="tile"><div class="l">With auto-fix</div><div class="v">${d.monitors.filter((m) => m.actions.restart_service || m.actions.fix_script_id).length}</div></div>
+        <div class="tile"><div class="l">Open a ticket on failure</div><div class="v">${d.monitors.filter((m) => m.actions.ticket).length}</div></div></div>
+      ${d.monitors.length ? '' : `<div class="card" style="margin-bottom:16px"><h2>Start with a ready-made monitor</h2><div class="tpl-grid">${d.templates.map((t, i) => `<div class="tpl">
+          <strong>${esc(t.name)}</strong><div class="small muted">${monitorSummary(t, d.types)}${t.actions.restart_service ? ' · auto-restart' : ''}${t.actions.ticket ? ' · opens a ticket' : ''}</div>
+          ${can('admin') ? `<button class="btn sm" data-tpl="${i}">Add</button>` : ''}</div>`).join('')}</div></div>`}
+      ${d.monitors.map((m) => `<div class="card mon-card ${m.enabled ? '' : 'disabled'}" style="margin-bottom:12px">
+        <div class="row" style="justify-content:space-between">
+          <button type="button" class="linkish" data-open="${m.id}"><strong>${open.has(m.id) ? '▾' : '▸'} ${esc(m.name)}</strong> <span class="obj-id">#${m.id}</span></button>
+          <div class="row">${m.enabled ? '' : badge('disabled')}${badge(m.severity)}${m.failing ? badge(`${m.failing} failing`, 'bad') : m.ok ? badge(`${m.ok} OK`, 'ok') : badge('waiting', 'info')}
+            ${can('tech') && m.enabled && d.types[m.type]?.device ? `<button class="btn sm" data-mon="check" data-id="${m.id}">Check now</button>` : ''}
+            ${can('admin') ? `<button class="btn sm" data-mon="edit" data-id="${m.id}">Edit</button>` : ''}</div></div>
+        <div class="small" style="margin-top:6px">${monitorSummary(m, d.types)}</div>
+        <div class="small muted">${esc(monTargetSummary(m.target, clients))} · ${m.targets} device(s)${m.actions.restart_service ? ' · 🔧 restarts the service' : ''}${m.actions.fix_script_id ? ' · 🔧 runs a fix script' : ''}${m.actions.ticket ? ' · 🎫 opens a ticket' : ''}</div>
+        ${open.has(m.id) ? `<div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Device</th><th>State</th><th>Detail</th><th>Checked</th></tr></thead><tbody>
+          ${m.devices.map((dv) => `<tr class="clickable" data-href="#/devices/${dv.id}"><td>${ICONS[dv.platform] ? `<span class="os">${ICONS[dv.platform]}</span>` : ''}<strong>${esc(dv.hostname)}</strong></td>
+            <td class="nowrap">${badge(...(MON_STATE[dv.state] || [dv.state, '']))}${dv.remediations ? ` <span class="small muted" title="Automatic fixes run in this incident">🔧×${dv.remediations}</span>` : ''}</td>
+            <td class="small">${esc(dv.detail)}</td><td class="small nowrap">${dv.checked_at ? fmtAgo(dv.checked_at) : '—'}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">No devices match the targets</td></tr>'}
+          </tbody></table></div>` : ''}</div>`).join('')}`;
+    return d;
+  };
+  let data = await draw();
+  view.addEventListener('click', guard(async (e) => {
+    const o = e.target.closest('[data-open]');
+    if (o) { const id = Number(o.dataset.open); open.has(id) ? open.delete(id) : open.add(id); state.monOpen = [...open]; data = await draw(); return; }
+    const tpl = e.target.closest('[data-tpl]');
+    if (tpl) { await api('POST', '/api/monitors', data.templates[Number(tpl.dataset.tpl)]); toast('Monitor added'); data = await draw(); return; }
+    const b = e.target.closest('[data-mon]');
+    if (!b) return;
+    if (b.dataset.mon === 'new') monitorModal(null, data, async () => { data = await draw(); });
+    if (b.dataset.mon === 'edit') monitorModal(data.monitors.find((m) => m.id === Number(b.dataset.id)), data, async () => { data = await draw(); });
+    if (b.dataset.mon === 'check') { await api('POST', `/api/monitors/${b.dataset.id}/check`); toast('Checks run on online devices within a minute'); }
+  }), { signal: state.pageAbort.signal });
+  every(30000, async () => { data = await draw(); });
+}
+
+async function monitorModal(mon, d, onSaved) {
+  const [clients, scripts, agents] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/scripts'), api('GET', '/api/agents')]);
+  const v = mon || { name: '', type: 'service', enabled: true, severity: 'warning', target: { platform: 'any', clients: [], classes: [], agents: [] }, params: {}, actions: { max_fixes: 3 } };
+  const groups = [...new Set(Object.values(d.types).map((t) => t.group))];
+  const m = openModal(mon ? `Edit monitor: ${mon.name}` : 'New monitor', `<form id="mon-form">
+      <div class="form-grid"><div class="field"><label>Name</label><input type="text" name="name" required maxlength="100" value="${esc(v.name)}" placeholder="e.g. SQL Server stopped"></div>
+        <div class="field"><label>Condition</label><select name="type" id="mon-type">${groups.map((g) => `<optgroup label="${esc(g)}">${Object.entries(d.types).filter(([, t]) => t.group === g).map(([k, t]) => `<option value="${k}" ${k === v.type ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</optgroup>`).join('')}</select></div></div>
+      <div class="form-grid" id="mon-params"></div>
+      <h3 style="margin-top:8px">Devices</h3>
+      <div class="form-grid"><div class="field"><label>Platform</label><select name="platform">${[['any', 'All platforms'], ['windows', 'Windows'], ['linux', 'Linux'], ['macos', 'macOS']].map(([k, l]) => `<option value="${k}" ${k === (v.target.platform || 'any') ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="field"><label>Device types (none = all)</label><div class="row">${Object.entries(CLASS_INFO).map(([k, [l]]) => `<label class="check"><input type="checkbox" name="cls-${k}" ${(v.target.classes || []).includes(k) ? 'checked' : ''}> ${esc(l)}</label>`).join('')}</div></div></div>
+      <div class="field"><label>Clients (none = all)</label><div class="check-list">${clients.map((c) => `<label class="check"><input type="checkbox" name="cl-${c.id}" ${(v.target.clients || []).includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('') || '<span class="muted small">No clients</span>'}</div></div>
+      <details ${v.target.agents?.length ? 'open' : ''}><summary class="small">Or pick specific devices (overrides the filters above)</summary><div class="check-list">${agents.map((a) => `<label class="check"><input type="checkbox" name="ag-${a.id}" ${(v.target.agents || []).includes(a.id) ? 'checked' : ''}> ${esc(a.hostname)}</label>`).join('')}</div></details>
+      <h3 style="margin-top:14px">When it fails</h3>
+      <div class="form-grid"><div class="field"><label>Alert severity</label><select name="severity">${d.severities.map((s) => `<option ${s === v.severity ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+        <div class="field"><label>Automatic fix: run a script</label><select name="fix_script_id"><option value="">— none —</option>${scripts.map((s) => `<option value="${s.id}" ${s.id === v.actions.fix_script_id ? 'selected' : ''}>${esc(s.name)} (${esc(s.shell)})</option>`).join('')}</select></div>
+        <div class="field"><label>Max. automatic fixes per day</label><input type="number" name="max_fixes" min="1" max="20" value="${v.actions.max_fixes || 3}"></div></div>
+      <label class="check" id="mon-fix-wrap"><input type="checkbox" name="restart_service" ${v.actions.restart_service ? 'checked' : ''}> <span id="mon-fix-label"></span></label>
+      <label class="check"><input type="checkbox" name="ticket" ${v.actions.ticket ? 'checked' : ''}> Open a ticket too</label>
+      <label class="check"><input type="checkbox" name="enabled" ${v.enabled ? 'checked' : ''}> Enabled</label>
+      <p class="small muted">The alert resolves by itself when the condition is OK again. A fix runs once per failure, then again after 30 minutes if it's still failing, up to the daily limit.</p></form>`,
+  { wide: true, foot: `${mon ? '<button class="btn danger" id="mon-del">Delete</button><span class="grow"></span>' : ''}<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="mon-form">Save</button>` });
+  const drawParams = () => {
+    const type = $('#mon-type', m).value, def = d.types[type];
+    const cur = type === v.type ? v.params : {};
+    $('#mon-params', m).innerHTML = def.p.map(([k, label, kind, dflt]) => `<div class="field"><label>${esc(label)}</label>${kind === 'script'
+      ? `<select name="p-${k}">${scripts.map((s) => `<option value="${s.id}" ${s.id === cur[k] ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`
+      : `<input name="p-${k}" type="${kind === 'num' ? 'number' : 'text'}" ${kind === 'num' ? 'min="0" step="any"' : ''} value="${esc(cur[k] ?? dflt ?? '')}">`}</div>`).join('')
+      + (def.platforms ? `<div class="field"><label>&nbsp;</label><div class="small muted">${def.platforms.map((p) => PLATFORM_NAME[p]).join(', ')} only</div></div>` : '');
+    $('#mon-fix-wrap', m).classList.toggle('hidden', !def.fix);
+    $('#mon-fix-label', m).textContent = def.fix || '';
+  };
+  $('#mon-type', m).addEventListener('change', drawParams);
+  drawParams();
+  $('#mon-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const type = f.get('type');
+    const body = {
+      name: f.get('name'), type, severity: f.get('severity'), enabled: !!f.get('enabled'),
+      target: {
+        platform: f.get('platform'), classes: Object.keys(CLASS_INFO).filter((k) => f.get(`cls-${k}`)),
+        clients: clients.filter((c) => f.get(`cl-${c.id}`)).map((c) => c.id), agents: agents.filter((a) => f.get(`ag-${a.id}`)).map((a) => a.id),
+      },
+      params: Object.fromEntries(d.types[type].p.map(([k]) => [k, f.get(`p-${k}`)])),
+      actions: { fix_script_id: f.get('fix_script_id') || null, restart_service: !!f.get('restart_service'), ticket: !!f.get('ticket'), max_fixes: f.get('max_fixes') },
+    };
+    if (mon) await api('PUT', `/api/monitors/${mon.id}`, body); else await api('POST', '/api/monitors', body);
+    closeModal(); toast('Monitor saved'); onSaved();
+  }));
+  $('#mon-del', m)?.addEventListener('click', guard(async () => {
+    if (!await confirmDialog(`Delete the monitor "${mon.name}"? Its open alerts are resolved.`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/monitors/${mon.id}`); toast('Monitor deleted'); onSaved();
+  }));
+}
+
+// ---------------- IT documentation & password vault ----------------
+async function pageDocs(view, tab = 'articles') {
+  if (tab === 'article') return; // handled by pageDocArticle
+  const clients = await api('GET', '/api/clients');
+  const cid = state.docsClient || '';
+  const tabs = [['articles', 'Articles'], ...(can('tech') ? [['passwords', 'Passwords']] : [])];
+  view.innerHTML = `<div class="page-head"><div><h1>Documentation</h1><div class="small muted">Procedures, network notes and passwords per client, linked to devices.</div></div>
+      <div class="row"><select id="dc-client" style="width:auto"><option value="">All clients</option><option value="global">General (no client)</option>${clients.map((c) => `<option value="${c.id}" ${String(c.id) === String(cid) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      ${can('tech') ? `<button class="btn primary" data-action="${tab === 'passwords' ? 'new-credential' : 'new-article'}">${tab === 'passwords' ? '+ New password' : '+ New article'}</button>` : ''}</div></div>
+    <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/docs/${k}" class="${k === tab ? 'active' : ''}">${l}</a>`).join('')}</nav>
+    <div class="toolbar"><input type="search" id="dc-q" placeholder="${tab === 'passwords' ? 'Search name, username, URL, device…' : 'Search titles and text…'}"></div><div id="dc-body"></div>`;
+  $('#dc-client').value = cid;
+  const draw = async () => {
+    state.docsClient = $('#dc-client').value;
+    const c = state.docsClient;
+    const q = $('#dc-q').value.toLowerCase();
+    if (tab === 'passwords') {
+      const list = (await api('GET', `/api/credentials${c && c !== 'global' ? `?client_id=${c}` : ''}`)).filter((x) => c !== 'global');
+      $('#dc-body').innerHTML = credTable(list.filter((x) => !q || [x.name, x.username, x.url, x.hostname, x.client_name, x.notes].join(' ').toLowerCase().includes(q)), { showClient: !c });
+      return;
+    }
+    const list = await api('GET', `/api/docs${c ? `?client_id=${c}` : ''}`);
+    const rows = list.filter((d) => !q || `${d.title} ${d.body} ${d.category}`.toLowerCase().includes(q));
+    const cats = [...new Set(rows.map((d) => d.category || 'General'))];
+    $('#dc-body').innerHTML = rows.length ? cats.map((cat) => `<h2 style="margin:16px 0 8px">${esc(cat)}</h2><div class="card flush"><div class="table-wrap"><table><tbody>
+        ${rows.filter((d) => (d.category || 'General') === cat).map((d) => `<tr class="clickable" data-href="#/docs/article/${d.id}"><td><strong>📄 ${esc(d.title)}</strong>
+          <div class="small muted">${esc(d.body.replace(/[#*`>\[\]()_-]/g, ' ').replace(/\s+/g, ' ').slice(0, 140))}</div></td>
+          <td class="small">${esc(d.client_name || 'General')}</td><td class="small nowrap">${d.agent_ids.length ? `🖥 ${d.agent_ids.length}` : ''}</td>
+          <td class="small nowrap muted">${fmtAgo(d.updated_at)} · ${esc(d.updated_by || '')}</td></tr>`).join('')}</tbody></table></div></div>`).join('')
+      : `<div class="card empty-card">${q ? 'Nothing matches.' : 'No articles yet. Write down how things are set up: the network, the backup, onboarding steps, vendor contacts…'}</div>`;
+  };
+  $('#dc-client').addEventListener('change', guard(draw));
+  let t;
+  $('#dc-q').addEventListener('input', () => { clearTimeout(t); t = setTimeout(guard(draw), 200); });
+  bindCredActions(view, draw);
+  await draw();
+}
+
+function credTable(list, { showClient = true, showDevice = true } = {}) {
+  return `<div class="card flush"><div class="table-wrap"><table><thead><tr><th>Name</th>${showClient ? '<th>Client</th>' : ''}${showDevice ? '<th>Device</th>' : ''}<th>Username</th><th>Password</th><th>Updated</th><th></th></tr></thead><tbody>
+    ${list.map((c) => `<tr><td><strong>🔑 ${esc(c.name)}</strong>${c.url ? `<div class="small">${/^https?:\/\//i.test(c.url) ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.url)}</a>` : `<span class="mono">${esc(c.url)}</span>`}</div>` : ''}${c.notes ? `<div class="small muted">${esc(c.notes.slice(0, 120))}</div>` : ''}</td>
+      ${showClient ? `<td class="small">${esc(c.client_name || '')}</td>` : ''}${showDevice ? `<td class="small">${c.agent_id ? `<a href="#/devices/${c.agent_id}/docs">${esc(c.hostname || '')}</a>` : '—'}</td>` : ''}
+      <td class="mono small">${c.username ? `${esc(c.username)} <button class="btn xs" data-copy-text="${esc(c.username)}" title="Copy username">⧉</button>` : ''}</td>
+      <td class="mono small nowrap">${c.has_secret ? `<span data-secret="${c.id}">••••••••</span> <button class="btn xs" data-reveal="${c.id}" title="Show (logged in the audit log)">👁</button><button class="btn xs" data-copy-secret="${c.id}" title="Copy password">⧉</button>` : '<span class="muted">—</span>'}</td>
+      <td class="small nowrap muted">${fmtAgo(c.updated_at)}</td><td class="right"><button class="btn sm" data-edit-cred="${c.id}">Edit</button></td></tr>`).join('')
+      || '<tr><td colspan="7" class="empty">No passwords stored</td></tr>'}</tbody></table></div></div>
+    <p class="small muted">Passwords are encrypted on the server (AES-256-GCM). Showing or copying one is recorded in the audit log.</p>`;
+}
+function bindCredActions(root, redraw) {
+  let cache = [];
+  root.addEventListener('click', guard(async (e) => {
+    const r = e.target.closest('[data-reveal]');
+    if (r) {
+      const { secret } = await api('POST', `/api/credentials/${r.dataset.reveal}/reveal`);
+      const span = $(`[data-secret="${r.dataset.reveal}"]`, root);
+      span.textContent = secret;
+      setTimeout(() => { if (span.isConnected) span.textContent = '••••••••'; }, 30000);
+      return;
+    }
+    const cp = e.target.closest('[data-copy-secret]');
+    if (cp) { const { secret } = await api('POST', `/api/credentials/${cp.dataset.copySecret}/reveal`); await copyText(secret); return; }
+    const ct = e.target.closest('[data-copy-text]');
+    if (ct) { await copyText(ct.dataset.copyText); return; }
+    const ed = e.target.closest('[data-edit-cred]');
+    if (ed) {
+      cache = await api('GET', '/api/credentials');
+      credentialModal(cache.find((x) => String(x.id) === ed.dataset.editCred), { onSaved: redraw });
+    }
+  }), { signal: state.pageAbort.signal });
+}
+
+async function credentialModal(c, { clientId = null, agentId = null, onSaved = () => router() } = {}) {
+  const [clients, agents] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/agents')]);
+  const v = c || { client_id: clientId || agents.find((a) => a.id === agentId)?.client_id || state.docsClient || '', agent_id: agentId };
+  const m = openModal(c ? `Edit ${c.name}` : 'New password', `<form id="cr-form" autocomplete="off"><div class="form-grid">
+      <div class="field"><label>Name</label><input type="text" name="name" required maxlength="150" value="${esc(v.name || '')}" placeholder="e.g. Firewall admin, Microsoft 365 global admin"></div>
+      <div class="field"><label>Client</label><select name="client_id" id="cr-client">${clients.map((x) => `<option value="${x.id}" ${String(x.id) === String(v.client_id) ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Device (optional)</label><select name="agent_id" id="cr-agent"></select></div>
+      <div class="field"><label>Username</label><input type="text" name="username" maxlength="200" value="${esc(v.username || '')}" autocomplete="off"></div>
+      <div class="field"><label>Password</label><input type="password" name="secret" maxlength="5000" autocomplete="new-password" placeholder="${c?.has_secret ? 'Leave empty to keep the saved one' : ''}">
+        <div class="row small"><label class="check"><input type="checkbox" id="cr-show"> show</label><button type="button" class="btn xs" id="cr-gen">Generate</button></div></div>
+      <div class="field"><label>URL / address</label><input type="text" name="url" maxlength="500" value="${esc(v.url || '')}" placeholder="https://192.168.1.1 or rdp://server01"></div></div>
+      <div class="field"><label>Notes</label><textarea name="notes" maxlength="5000">${esc(v.notes || '')}</textarea></div></form>`,
+  { foot: `${c ? '<button class="btn danger" id="cr-del">Delete</button><span class="grow"></span>' : ''}<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="cr-form">Save</button>` });
+  if (!clients.length) { $('#cr-form', m).innerHTML = '<p>Create a client first.</p>'; return; }
+  const fill = () => {
+    const cl = $('#cr-client', m).value;
+    $('#cr-agent', m).innerHTML = `<option value="">— none —</option>${agents.filter((a) => String(a.client_id) === cl).map((a) => `<option value="${a.id}" ${a.id === v.agent_id ? 'selected' : ''}>${esc(a.hostname)}</option>`).join('')}`;
+  };
+  $('#cr-client', m).addEventListener('change', fill);
+  fill();
+  $('#cr-show', m).addEventListener('change', (e) => { m.querySelector('[name=secret]').type = e.target.checked ? 'text' : 'password'; });
+  $('#cr-gen', m).addEventListener('click', () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%*-_=+';
+    const r = crypto.getRandomValues(new Uint32Array(20));
+    const inp = m.querySelector('[name=secret]');
+    inp.value = [...r].map((n) => chars[n % chars.length]).join(''); inp.type = 'text'; $('#cr-show', m).checked = true;
+  });
+  $('#cr-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target));
+    if (c && !body.secret) delete body.secret;
+    if (c) await api('PUT', `/api/credentials/${c.id}`, body); else await api('POST', '/api/credentials', body);
+    closeModal(); toast('Password saved'); onSaved();
+  }));
+  $('#cr-del', m)?.addEventListener('click', guard(async () => {
+    if (!await confirmDialog(`Delete the password "${c.name}"? It can't be recovered.`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/credentials/${c.id}`); closeModal(); toast('Password deleted'); onSaved();
+  }));
+}
+
+async function pageDocArticle(view, id) {
+  const d = await api('GET', `/api/docs/${id}`);
+  $('#page-title').textContent = d.title;
+  view.innerHTML = `<div class="page-head"><div><div class="small"><a href="#/docs/articles">← Documentation</a></div><h1>${esc(d.title)}</h1>
+      <div class="small muted" style="margin-top:4px">${esc(d.client_name || 'General')}${d.category ? ` · ${esc(d.category)}` : ''} · updated ${fmtAgo(d.updated_at)} by ${esc(d.updated_by || '?')}</div></div>
+      <div class="row"><button class="btn" id="da-print">Print</button>${can('tech') ? '<button class="btn primary" id="da-edit">Edit</button>' : ''}</div></div>
+    <div class="grid doc-layout"><div class="card md doc-body">${mdRender(d.body) || '<p class="muted">Empty article.</p>'}</div>
+      ${d.devices.length ? `<div class="card"><h3>Related devices</h3><table class="dash"><tbody>${d.devices.map((a) => `<tr class="clickable" data-href="#/devices/${a.id}"><td>${ICONS[a.platform] ? `<span class="os">${ICONS[a.platform]}</span>` : ''}${esc(a.hostname)}</td></tr>`).join('')}</tbody></table></div>` : ''}</div>`;
+  $('#da-print').addEventListener('click', () => window.print());
+  $('#da-edit')?.addEventListener('click', () => articleModal(d));
+}
+
+async function articleModal(d, { clientId = null, agentId = null } = {}) {
+  const [clients, agents] = await Promise.all([api('GET', '/api/clients'), api('GET', '/api/agents')]);
+  const v = d || { client_id: clientId || agents.find((a) => a.id === agentId)?.client_id || (state.docsClient && state.docsClient !== 'global' ? state.docsClient : ''), agent_ids: agentId ? [agentId] : [], body: '', category: '' };
+  const m = openModal(d ? `Edit ${d.title}` : 'New article', `<form id="ar-form"><div class="form-grid">
+      <div class="field"><label>Title</label><input type="text" name="title" required maxlength="200" value="${esc(v.title || '')}" placeholder="e.g. Network layout, Backup procedure"></div>
+      <div class="field"><label>Client</label><select name="client_id" id="ar-client"><option value="">General (all clients)</option>${clients.map((x) => `<option value="${x.id}" ${String(x.id) === String(v.client_id ?? '') ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Category</label><input type="text" name="category" maxlength="60" value="${esc(v.category || '')}" placeholder="e.g. Network, Procedures, Vendors" list="ar-cats"><datalist id="ar-cats">${['Network', 'Procedures', 'Onboarding', 'Backup', 'Vendors', 'Licenses', 'Servers'].map((x) => `<option value="${x}">`).join('')}</datalist></div></div>
+      <div class="field"><div class="row" style="justify-content:space-between"><label>Text <span class="small muted">(Markdown: # heading, **bold**, - list, - [ ] checklist, \`code\`, [link](https://…))</span></label>
+        <button type="button" class="btn xs" id="ar-prev">Preview</button></div>
+        <textarea name="body" rows="16" class="mono" maxlength="200000">${esc(v.body || '')}</textarea><div class="card md hidden" id="ar-preview" style="max-height:420px;overflow:auto"></div></div>
+      <details ${v.agent_ids.length ? 'open' : ''}><summary class="small">Related devices (${v.agent_ids.length})</summary><div class="check-list" id="ar-agents"></div></details></form>`,
+  { wide: true, foot: `${d ? '<button class="btn danger" id="ar-del">Delete</button><span class="grow"></span>' : ''}<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="ar-form">Save</button>` });
+  const chosen = new Set(v.agent_ids);
+  const fill = () => {
+    $$('#ar-agents input', m).forEach((i) => (i.checked ? chosen.add(i.value) : chosen.delete(i.value)));
+    const cl = $('#ar-client', m).value;
+    $('#ar-agents', m).innerHTML = agents.filter((a) => !cl || String(a.client_id) === cl || chosen.has(a.id)).map((a) => `<label class="check"><input type="checkbox" value="${a.id}" ${chosen.has(a.id) ? 'checked' : ''}> ${esc(a.hostname)}</label>`).join('') || '<span class="muted small">No devices</span>';
+  };
+  $('#ar-client', m).addEventListener('change', fill);
+  fill();
+  $('#ar-prev', m).addEventListener('click', () => {
+    const p = $('#ar-preview', m), ta = m.querySelector('[name=body]');
+    const show = p.classList.contains('hidden');
+    p.innerHTML = mdRender(ta.value) || '<p class="muted">Nothing yet.</p>';
+    p.classList.toggle('hidden', !show); ta.classList.toggle('hidden', show);
+    $('#ar-prev', m).textContent = show ? 'Edit' : 'Preview';
+  });
+  $('#ar-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    $$('#ar-agents input', m).forEach((i) => (i.checked ? chosen.add(i.value) : chosen.delete(i.value)));
+    const body = { ...Object.fromEntries(new FormData(e.target)), agent_ids: [...chosen] };
+    const saved = d ? await api('PUT', `/api/docs/${d.id}`, body) : await api('POST', '/api/docs', body);
+    closeModal(); toast('Article saved');
+    if (location.hash === `#/docs/article/${saved.id}`) router(); else location.hash = `#/docs/article/${saved.id}`;
+  }));
+  $('#ar-del', m)?.addEventListener('click', guard(async () => {
+    if (!await confirmDialog(`Delete the article "${d.title}"?`, { okLabel: 'Delete', danger: true })) return;
+    await api('DELETE', `/api/docs/${d.id}`); closeModal(); toast('Article deleted'); location.hash = '#/docs/articles';
+  }));
+}
+
+async function devDocs(el, a) {
+  const [docs, creds] = await Promise.all([api('GET', `/api/docs?agent_id=${encodeURIComponent(a.id)}`), can('tech') ? api('GET', `/api/credentials?agent_id=${encodeURIComponent(a.id)}`) : Promise.resolve(null)]);
+  el.innerHTML = `<div class="card flush" style="margin-bottom:16px"><div class="row" style="justify-content:space-between;padding:14px 16px 0"><h2 style="margin:0">Articles</h2>
+      ${can('tech') ? `<button class="btn sm" data-action="new-article" data-agent="${a.id}">+ New article</button>` : ''}</div>
+    <div class="table-wrap" style="margin-top:8px"><table><tbody>${docs.map((d) => `<tr class="clickable" data-href="#/docs/article/${d.id}"><td><strong>📄 ${esc(d.title)}</strong> <span class="small muted">${esc(d.category || '')}</span></td>
+      <td class="small muted">${d.agent_ids.includes(a.id) ? 'linked to this device' : `all ${esc(d.client_name || '')} devices`}</td><td class="small nowrap muted">${fmtAgo(d.updated_at)}</td></tr>`).join('')
+      || '<tr><td class="empty">No articles for this device or its client</td></tr>'}</tbody></table></div></div>
+    ${creds ? `<div class="row" style="justify-content:space-between;margin-bottom:8px"><h2 style="margin:0">Passwords</h2><button class="btn sm" data-action="new-credential" data-agent="${a.id}">+ New password</button></div>
+      ${credTable(creds, { showClient: false, showDevice: false })}` : ''}`;
+  if (creds) bindCredActions(el, () => devDocs(el, a));
+}
+
+// ---------------- warranty ----------------
+const W_STATUS = { expired: ['Expired', 'bad'], expiring: ['Ends soon', 'warn'], active: ['Covered', 'ok'], unknown: ['Unknown', ''] };
+async function pageWarranty(view) {
+  let list = await api('GET', '/api/warranty');
+  let filter = state.warrantyFilter || '';
+  const draw = () => {
+    const n = (s) => list.filter((d) => d.status === s).length;
+    const q = ($('#wr-q')?.value || '').toLowerCase();
+    const rows = list.filter((d) => (!filter || d.status === filter) && (!q || [d.hostname, d.client_name, d.manufacturer, d.model, d.serial].join(' ').toLowerCase().includes(q)));
+    $('#wr-tiles').innerHTML = [['', 'All devices', list.length, ''], ['expired', 'Expired', n('expired'), 'bad'], ['expiring', 'Ending within 90 days', n('expiring'), 'warn'], ['active', 'Covered', n('active'), 'ok'], ['unknown', 'No warranty date', n('unknown'), '']]
+      .map(([k, l, v, c]) => `<button type="button" class="tile ${c} ${filter === k ? 'sel' : ''}" data-wf="${k}"><div class="l">${l}</div><div class="v">${v}</div></button>`).join('');
+    $('#wr-body').innerHTML = rows.map((d) => `<tr><td><a href="#/devices/${d.id}"><strong>${esc(d.hostname)}</strong></a><div class="small muted">${esc(d.client_name || '')}</div></td>
+      <td class="small">${esc([d.manufacturer, d.model].filter(Boolean).join(' ') || '—')}</td><td class="mono small">${esc(d.serial || '')}</td>
+      <td class="small nowrap">${esc(d.purchase_date || '—')}${d.age_years != null ? `<div class="muted">${d.age_years} yr old</div>` : ''}</td>
+      <td class="small nowrap">${esc(d.warranty_end || '—')}${d.days_left != null ? `<div class="muted">${d.days_left < 0 ? `${-d.days_left} days ago` : `${d.days_left} days left`}</div>` : ''}</td>
+      <td>${badge(...W_STATUS[d.status])}${d.warranty_note ? `<div class="small muted">${esc(d.warranty_note)}</div>` : ''}</td>
+      <td class="right nowrap">${d.lookup_url ? `<a class="btn sm" href="${esc(d.lookup_url)}" target="_blank" rel="noopener" title="The manufacturer's warranty page for this serial number">Look up ↗</a> ` : ''}${can('tech') ? `<button class="btn sm" data-wedit="${d.id}">Edit</button>` : ''}</td></tr>`).join('')
+      || '<tr><td colspan="7" class="empty">No devices</td></tr>';
+  };
+  view.innerHTML = `<div class="page-head"><div><h1>Warranty</h1><div class="small muted">Track purchase dates and warranty end dates. HostPilot raises an alert ${'<a href="#/settings">'}before a warranty ends</a>.</div></div>
+      <div class="row">${can('tech') ? '<label class="btn">Import CSV<input type="file" id="wr-file" accept=".csv,text/csv" hidden></label>' : ''}<button class="btn" id="wr-export">Export CSV</button></div></div>
+    <div class="tiles" id="wr-tiles"></div>
+    <div class="toolbar"><input type="search" id="wr-q" placeholder="Search device, model, serial, client…"></div>
+    <div class="card flush"><div class="table-wrap"><table><thead><tr><th>Device</th><th>Model</th><th>Serial</th><th>Purchased</th><th>Warranty ends</th><th>Status</th><th></th></tr></thead><tbody id="wr-body"></tbody></table></div></div>
+    <p class="small muted">CSV import: a header row with <span class="mono">serial</span> (or <span class="mono">hostname</span>), <span class="mono">warranty_end</span>, and optionally <span class="mono">purchase_date</span> and <span class="mono">note</span>. Most vendors' warranty portals export this.</p>`;
+  $('#wr-q').addEventListener('input', draw);
+  view.addEventListener('click', guard(async (e) => {
+    const t = e.target.closest('[data-wf]');
+    if (t) { filter = state.warrantyFilter = t.dataset.wf; draw(); return; }
+    const ed = e.target.closest('[data-wedit]');
+    if (ed) warrantyModal(list.find((d) => d.id === ed.dataset.wedit), async () => { list = await api('GET', '/api/warranty'); draw(); });
+  }), { signal: state.pageAbort.signal });
+  $('#wr-export').addEventListener('click', () => {
+    const cols = ['hostname', 'client_name', 'manufacturer', 'model', 'serial', 'purchase_date', 'warranty_end', 'status', 'warranty_note'];
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const csv = [cols.join(','), ...list.map((d) => cols.map((c) => q(d[c])).join(','))].join('\r\n');
+    const aEl = document.createElement('a');
+    aEl.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); aEl.download = 'hostpilot-warranty.csv'; aEl.click();
+    setTimeout(() => URL.revokeObjectURL(aEl.href), 5000);
+  });
+  $('#wr-file')?.addEventListener('change', guard(async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const rows = parseCsv(await file.text());
+    e.target.value = '';
+    if (!rows.length) { toast('No rows found. The first line must be a header (serial, warranty_end…)', 'error'); return; }
+    const r = await api('POST', '/api/warranty/import', { rows });
+    toast(`Updated ${r.updated} device(s)${r.unmatched_count ? `; ${r.unmatched_count} row(s) didn't match a device` : ''}`, r.unmatched_count ? 'error' : 'ok');
+    list = await api('GET', '/api/warranty'); draw();
+  }));
+  draw();
+}
+/** CSV with a header row -> [{header: value}], headers lower-cased with spaces as _ ("Warranty End" -> warranty_end). */
+function parseCsv(text) {
+  const rows = [];
+  let row = [], cur = '', q = false;
+  const src = String(text).replace(/^﻿/, '');
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (q) { if (ch === '"' && src[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch; continue; }
+    if (ch === '"') q = true;
+    else if (ch === ',' || ch === ';' || ch === '\t') { row.push(cur); cur = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && src[i + 1] === '\n') i++; row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += ch;
+  }
+  if (cur || row.length) { row.push(cur); rows.push(row); }
+  const [head, ...data] = rows.filter((r) => r.some((c) => c.trim()));
+  if (!head) return [];
+  const alias = { service_tag: 'serial', serial_number: 'serial', serialnumber: 'serial', device: 'hostname', computer: 'hostname', name: 'hostname', end_date: 'warranty_end', warranty_end_date: 'warranty_end', expiration: 'warranty_end', expires: 'warranty_end', ship_date: 'purchase_date', purchased: 'purchase_date', start_date: 'purchase_date' };
+  const keys = head.map((h) => { const k = h.trim().toLowerCase().replace(/[\s-]+/g, '_'); return alias[k] || k; });
+  return data.map((r) => Object.fromEntries(keys.map((k, i) => [k, (r[i] || '').trim()])));
+}
+function warrantyModal(d, onSaved) {
+  const m = openModal(`Warranty: ${d.hostname}`, `<form id="wy-form"><p class="small muted">${esc([d.manufacturer, d.model].filter(Boolean).join(' '))}${d.serial ? ` · serial <span class="mono">${esc(d.serial)}</span>` : ''}
+      ${d.lookup_url ? ` · <a href="${esc(d.lookup_url)}" target="_blank" rel="noopener">check on the vendor's site ↗</a>` : ''}</p>
+      <div class="form-grid"><div class="field"><label>Purchase date</label><input type="date" name="purchase_date" value="${esc(d.purchase_date || '')}"></div>
+      <div class="field"><label>Warranty ends</label><input type="date" name="warranty_end" value="${esc(d.warranty_end || '')}"></div></div>
+      <div class="field"><label>Note</label><input type="text" name="warranty_note" maxlength="300" value="${esc(d.warranty_note || '')}" placeholder="e.g. 3-year ProSupport, next business day"></div></form>`,
+  { foot: '<button class="btn" data-action="close-modal">Cancel</button><button class="btn primary" form="wy-form">Save</button>' });
+  $('#wy-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    await api('PUT', `/api/agents/${d.id}`, Object.fromEntries(new FormData(e.target)));
+    closeModal(); toast('Warranty saved'); onSaved();
+  }));
+}
+
+// ---------------- API keys ----------------
+async function apiKeysModal() {
+  const draw = async (created) => {
+    const keys = await api('GET', '/api/me/api-keys');
+    const roles = ['viewer', 'tech', 'admin'].filter((r) => can(r));
+    const m = openModal('API keys', `${created ? `<div class="card" style="border-color:var(--ok);margin-bottom:14px"><strong>Copy your new key now.</strong> It isn't shown again.
+        <div class="row" style="margin-top:8px"><code class="mono" style="word-break:break-all">${esc(created.token)}</code><button class="btn sm" data-copy-text="${esc(created.token)}">Copy</button></div></div>` : ''}
+      <p class="small muted">Use a key from scripts and other tools: <span class="mono">Authorization: Bearer hpk_…</span>. A key acts as you, limited to the role you pick. Example:</p>
+      <pre class="small">curl -H "Authorization: Bearer hpk_…" ${esc(location.origin)}/api/agents</pre>
+      <table><thead><tr><th>Name</th><th>Role</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead><tbody>
+        ${keys.map((k) => `<tr><td><strong>${esc(k.name)}</strong> <span class="mono small muted">${esc(k.prefix)}…</span></td><td>${esc(k.role)}</td><td class="small">${fmtAgo(k.created_at)}</td>
+          <td class="small">${k.last_used ? fmtAgo(k.last_used) : 'never'}</td><td class="small">${k.expires_at ? new Date(k.expires_at).toLocaleDateString() : 'never'}</td>
+          <td class="right"><button class="btn sm danger" data-del-key="${k.id}">Revoke</button></td></tr>`).join('') || '<tr><td colspan="6" class="empty">No keys yet</td></tr>'}</tbody></table>
+      <form id="ak-form" style="margin-top:14px"><div class="form-grid"><div class="field"><label>Name</label><input type="text" name="name" required maxlength="80" placeholder="e.g. PSA integration"></div>
+        <div class="field"><label>Role</label><select name="role">${roles.map((r) => `<option ${r === 'viewer' ? 'selected' : ''}>${r}</option>`).join('')}</select></div>
+        <div class="field"><label>Expires after (days)</label><input type="number" name="expires_days" min="0" max="3650" value="365"><div class="small muted">0 = never</div></div></div>
+        <button class="btn primary">Create key</button></form>`, { wide: true });
+    $('#ak-form', m).addEventListener('submit', guard(async (e) => {
+      e.preventDefault();
+      const k = await api('POST', '/api/me/api-keys', Object.fromEntries(new FormData(e.target)));
+      await draw(k);
+    }));
+    m.addEventListener('click', guard(async (e) => {
+      const c = e.target.closest('[data-copy-text]');
+      if (c) await copyText(c.dataset.copyText);
+      const d = e.target.closest('[data-del-key]');
+      if (d) { await api('DELETE', `/api/me/api-keys/${d.dataset.delKey}`); toast('Key revoked'); await draw(); }
+    }));
+  };
+  await draw();
+}
+
+// ---------------- support portal access (contact modal) ----------------
+function portalSection(c) {
+  if (!c) return '<p class="small muted">Save the contact first to give them access to the support portal.</p>';
+  return `<div class="card" style="margin-top:6px"><h3>Support portal</h3>
+    <p class="small muted">${c.portal ? `${badge('enabled', 'ok')} ${esc(c.name)} signs in at <a href="/portal" target="_blank" rel="noopener">${esc(location.origin)}/portal</a> with ${esc(c.email)}${c.portal_login ? ` · last sign-in ${fmtAgo(c.portal_login)}` : ''}.`
+    : 'Let this person sign in to see their devices, open tickets and follow up on them.'}</p>
+    <div class="form-grid"><div class="field"><label>${c.portal ? 'New password (optional)' : 'Password'}</label><input type="text" id="pt-pw" minlength="10" autocomplete="off" placeholder="at least 10 characters"></div>
+      <div class="field"><label>&nbsp;</label><label class="check"><input type="checkbox" id="pt-all" ${c.portal_all ? 'checked' : ''}> Sees every device and ticket of the company</label></div></div>
+    <div class="row"><button type="button" class="btn" id="pt-gen">Generate password</button><button type="button" class="btn primary" id="pt-save">${c.portal ? 'Update access' : 'Give portal access'}</button>
+      ${c.portal ? '<button type="button" class="btn danger" id="pt-off">Remove access</button>' : ''}</div></div>`;
+}
+function bindPortalSection(m, c, onSaved) {
+  if (!c) return;
+  $('#pt-gen', m)?.addEventListener('click', () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    $('#pt-pw', m).value = [...crypto.getRandomValues(new Uint32Array(14))].map((n) => chars[n % chars.length]).join('');
+  });
+  $('#pt-save', m)?.addEventListener('click', guard(async () => {
+    const pw = $('#pt-pw', m).value;
+    await api('PUT', `/api/contacts/${c.id}/portal`, { enabled: true, password: pw || undefined, all: $('#pt-all', m).checked });
+    if (pw) await copyText(`${location.origin}/portal\nEmail: ${c.email}\nPassword: ${pw}`);
+    closeModal(); toast(pw ? 'Portal access saved. Sign-in details copied to the clipboard.' : 'Portal access saved'); onSaved();
+  }));
+  $('#pt-off', m)?.addEventListener('click', guard(async () => {
+    await api('PUT', `/api/contacts/${c.id}/portal`, { enabled: false });
+    closeModal(); toast('Portal access removed'); onSaved();
+  }));
+}
+
+Object.assign(ACTIONS, {
+  'new-ticket': (el) => newTicketModal({ agentId: el.dataset.agent || null, clientId: el.dataset.client || null }),
+  'alert-ticket': async (el) => {
+    const t = await api('POST', `/api/tickets/from-alert/${el.dataset.id}`);
+    toast(`Ticket #${t.id}`); location.hash = `#/tickets/${t.id}`;
+  },
+  'new-article': (el) => articleModal(null, { agentId: el.dataset.agent || null }),
+  'new-credential': (el) => credentialModal(null, { agentId: el.dataset.agent || null, onSaved: () => router() }),
+  'api-keys': () => apiKeysModal(),
 });
 
 // ---------------- boot ----------------
