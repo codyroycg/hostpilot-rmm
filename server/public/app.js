@@ -3656,7 +3656,7 @@ function mdRender(src) {
 // ---------------- ticketing ----------------
 const T_STATUS = { new: ['New', 'info'], open: ['Open', 'warn'], pending: ['Waiting on customer', ''], resolved: ['Resolved', 'ok'], closed: ['Closed', ''] };
 const T_PRIO = { urgent: ['Urgent', 'bad'], high: ['High', 'warn'], normal: ['Normal', ''], low: ['Low', ''] };
-const T_SOURCE = { tech: 'Technician', alert: 'Alert', monitor: 'Monitor', portal: 'Support portal' };
+const T_SOURCE = { tech: 'Technician', alert: 'Alert', monitor: 'Monitor', portal: 'Support portal', device: 'From the computer (tray icon)' };
 const tStatus = (s) => badge(...(T_STATUS[s] || [s, '']));
 const tPrio = (p) => badge(...(T_PRIO[p] || [p, '']));
 let ticketMeta = null;

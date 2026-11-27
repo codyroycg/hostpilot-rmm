@@ -65,9 +65,9 @@ export function conversations() {
 }
 
 // ---------- device (tray icon) side ----------
-function deviceAgent(token) {
+export function deviceAgent(token) {
   if (typeof token !== 'string' || !/^[a-f0-9]{48}$/.test(token)) throw new HttpError(401, 'Invalid chat token');
-  const a = get('SELECT id, hostname FROM agents WHERE chat_token=?', token);
+  const a = get('SELECT id, hostname, client_id, contact_id FROM agents WHERE chat_token=?', token);
   if (!a) throw new HttpError(401, 'Invalid chat token');
   return a;
 }

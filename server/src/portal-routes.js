@@ -5,6 +5,7 @@ import { all, get, run, audit, getSettings } from './db.js';
 import { HttpError, randHex, sha256, verifyPassword, hashPassword } from './util.js';
 import { isPolling } from './jobs.js';
 import { createTicket, addComment, listTickets, getTicket } from './tickets.js';
+import { deviceAgent } from './chat.js';
 
 const COOKIE = 'hp_portal';
 const TTL = 8 * 3600 * 1000;
@@ -126,6 +127,41 @@ route('POST', '/api/portal/tickets/:id/comments', (ctx) => {
   addComment(tk.id, { author: c.name, author_kind: 'contact', body: ctx.body.body });
   return publicTicket(ownTicket(c, tk.id));
 });
+// ---------- tickets from the device itself (tray icon; authorised by the device's chat token) ----------
+// Anyone signed in on the computer can open a ticket for it and follow that computer's tickets, like the chat.
+const tokenOf = (ctx) => deviceAgent(String(ctx.query.get('token') || ''));
+const deviceTicket = (a, id) => {
+  const tk = getTicket(Number(id), { includeInternal: false });
+  if (tk.agent_id !== a.id) throw new HttpError(404, 'Ticket not found');
+  return tk;
+};
+const deviceView = (t) => ({
+  id: t.id, subject: t.subject, status: t.status, status_text: ({ new: 'Received', open: 'In progress', pending: 'Waiting for your reply', resolved: 'Solved', closed: 'Closed' })[t.status] || t.status,
+  created_at: t.created_at, updated_at: t.updated_at,
+  thread: (t.thread || []).filter((m) => m.author_kind !== 'system').map((m) => ({ id: m.id, author: m.author_kind === 'tech' ? `${m.author} (IT support)` : m.author, tech: m.author_kind === 'tech', body: m.body, created_at: m.created_at })),
+});
+route('POST', '/api/chat/device/ticket', (ctx) => {
+  const a = tokenOf(ctx);
+  const b = ctx.body;
+  const author = String(b.author || 'User').replace(/[\0-\x1f]/g, '').slice(0, 100);
+  if (!String(b.body || '').trim()) throw new HttpError(400, 'Describe the problem');
+  const id = createTicket({ subject: b.subject, body: b.body, agent_id: a.id, contact_id: a.contact_id || null, priority: b.urgent ? 'high' : 'normal',
+    source: 'device', created_by: `${author} (on ${a.hostname})`, author_kind: 'contact' });
+  return deviceView(getTicket(id, { includeInternal: false }));
+});
+route('GET', '/api/chat/device/tickets', (ctx) => {
+  const a = tokenOf(ctx);
+  const ids = all("SELECT id FROM tickets WHERE agent_id=? AND (status IN ('new','open','pending') OR updated_at > ?) ORDER BY updated_at DESC LIMIT 30", a.id, Date.now() - 30 * 86400000);
+  return ids.map((r) => deviceView(getTicket(r.id, { includeInternal: false })));
+});
+route('POST', '/api/chat/device/tickets/:id/reply', (ctx) => {
+  const a = tokenOf(ctx);
+  const tk = deviceTicket(a, ctx.params.id);
+  if (tk.status === 'closed') throw new HttpError(400, 'This ticket is closed. Open a new one.');
+  addComment(tk.id, { author: `${String(ctx.body.author || 'User').slice(0, 100)} (on ${a.hostname})`, author_kind: 'contact', body: ctx.body.body });
+  return deviceView(getTicket(tk.id, { includeInternal: false }));
+});
+
 route('POST', '/api/portal/tickets/:id/resolve', (ctx) => {
   const c = contact(ctx);
   const tk = ownTicket(c, ctx.params.id);

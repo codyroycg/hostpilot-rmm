@@ -89,6 +89,7 @@ namespace HostPilot {
     DateTime updateRequested = DateTime.MinValue;
     string lastVersion;
     ChatClient chat;
+    TicketClient tickets;
     public Icon AppIcon { get { return icons[(int)AgentState.Connected]; } }
     public void Balloon(string title, string text) { icon.ShowBalloonTip(6000, title, text, ToolTipIcon.Info); }
 
@@ -107,15 +108,22 @@ namespace HostPilot {
       var chatItem = new ToolStripMenuItem("Chat with IT support...", null, delegate { chat.ShowWindow(false); });
       chatItem.Font = new Font(chatItem.Font, FontStyle.Bold);
       menu.Items.Add(chatItem);
+      menu.Items.Add("Open a support ticket...", null, delegate { tickets.ShowNew(); });
+      menu.Items.Add("My support tickets...", null, delegate { tickets.ShowList(0); });
       menu.Items.Add("Update agent now", null, delegate { UpdateNow(); });
       menu.Opening += delegate { Refresh(); };
 
       icon.ContextMenuStrip = menu;
       icon.DoubleClick += delegate { chat.ShowWindow(false); };
-      icon.BalloonTipClicked += delegate { if (chat.Pending) chat.ShowWindow(false); };
+      icon.BalloonTipClicked += delegate {
+        if (chat.Pending) chat.ShowWindow(false);
+        else if (tickets.PendingTicket > 0) tickets.ShowList(tickets.PendingTicket);
+      };
       icon.Visible = true;
       chat = new ChatClient(this);
       chat.Start();
+      tickets = new TicketClient(this);
+      tickets.Start();
       timer.Interval = 5000;
       timer.Tick += delegate { Refresh(); };
       timer.Start();
@@ -237,6 +245,7 @@ namespace HostPilot {
 
     public void Dispose() {
       if (chat != null) chat.Stop();
+      if (tickets != null) tickets.Stop();
       timer.Dispose();
       icon.Visible = false;
       icon.Dispose();
@@ -258,8 +267,8 @@ namespace HostPilot {
 
     public ChatClient(TrayApp app) { this.app = app; ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext(); }
 
-    static string Server() { return (Program.ServerOverride ?? TrayApp.RegS("Server")).TrimEnd('/'); }
-    static string Token() { return Program.TokenOverride ?? TrayApp.RegS("ChatToken"); }
+    internal static string Server() { return (Program.ServerOverride ?? TrayApp.RegS("Server")).TrimEnd('/'); }
+    internal static string Token() { return Program.TokenOverride ?? TrayApp.RegS("ChatToken"); }
 
     public void Start() {
       ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
@@ -267,7 +276,7 @@ namespace HostPilot {
     }
     public void Stop() { stop = true; }
 
-    static string Http(string method, string url, string json, int timeoutMs) {
+    internal static string Http(string method, string url, string json, int timeoutMs) {
       var req = (HttpWebRequest)WebRequest.Create(url);
       req.Method = method; req.Timeout = timeoutMs; req.ReadWriteTimeout = timeoutMs; req.UserAgent = "HostPilotTray";
       if (json != null) {
@@ -410,6 +419,292 @@ namespace HostPilot {
 
     protected override void OnFormClosing(FormClosingEventArgs e) {
       // closing just hides the window; the conversation keeps running in the tray
+      if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+      base.OnFormClosing(e);
+    }
+  }
+
+  // ---------- support tickets ----------
+  // Uses the same per-device chat token: open a ticket for this computer, follow this computer's tickets and reply.
+  // Polls every minute and shows a notification when IT support replies.
+  sealed class TicketClient {
+    readonly TrayApp app;
+    readonly SynchronizationContext ui;
+    readonly Dictionary<long, long> seen = new Dictionary<long, long>(); // ticket id -> newest IT reply id already seen
+    bool loaded;
+    volatile bool stop;
+    public long PendingTicket;
+    NewTicketForm newForm;
+    TicketsForm listForm;
+
+    public TicketClient(TrayApp app) { this.app = app; ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext(); }
+    public void Start() { var t = new Thread(Loop); t.IsBackground = true; t.Start(); }
+    public void Stop() { stop = true; }
+
+    static string Url(string path) { return ChatClient.Server() + path + (path.Contains("?") ? "&" : "?") + "token=" + Uri.EscapeDataString(ChatClient.Token()); }
+
+    /** The server's own error text ("Describe the problem") instead of "(400) Bad Request". */
+    public static string ErrorText(Exception e) {
+      var we = e as WebException;
+      if (we != null && we.Response != null) {
+        try {
+          using (var r = new StreamReader(we.Response.GetResponseStream(), Encoding.UTF8)) {
+            var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(r.ReadToEnd());
+            if (d != null && d.ContainsKey("error")) return Convert.ToString(d["error"]);
+          }
+        } catch { }
+      }
+      return e.Message;
+    }
+
+    public System.Collections.ArrayList Fetch() {
+      return new JavaScriptSerializer().Deserialize<System.Collections.ArrayList>(ChatClient.Http("GET", Url("/api/chat/device/tickets"), null, 20000));
+    }
+
+    void Loop() {
+      while (!stop) {
+        if (ChatClient.Server().Length == 0 || ChatClient.Token().Length == 0) { Thread.Sleep(15000); continue; }
+        try {
+          var list = Fetch();
+          long notify = 0; string subject = null;
+          foreach (Dictionary<string, object> t in list) {
+            long id = Convert.ToInt64(t["id"]);
+            long newest = 0;
+            foreach (Dictionary<string, object> m in (System.Collections.ArrayList)t["thread"])
+              if (Convert.ToBoolean(m["tech"])) newest = Math.Max(newest, Convert.ToInt64(m["id"]));
+            lock (seen) {
+              long old;
+              bool had = seen.TryGetValue(id, out old);
+              if (loaded && newest > 0 && (!had || newest > old)) { notify = id; subject = Convert.ToString(t["subject"]); }
+              seen[id] = Math.Max(newest, had ? old : 0);
+            }
+          }
+          loaded = true;
+          if (notify > 0) {
+            long n = notify; string s = subject;
+            ui.Post(delegate {
+              PendingTicket = n;
+              app.Balloon("IT support replied", "Ticket #" + n + ": " + (s.Length > 80 ? s.Substring(0, 80) + "..." : s) + "\nClick to read the reply.");
+              if (listForm != null && !listForm.IsDisposed && listForm.Visible) listForm.Reload(n);
+            }, null);
+          }
+        } catch { }
+        for (int i = 0; i < 60 && !stop; i++) Thread.Sleep(1000);
+      }
+    }
+
+    public void MarkSeen(long id, long newestTech) { lock (seen) seen[id] = Math.Max(newestTech, seen.ContainsKey(id) ? seen[id] : 0); }
+
+    public void ShowNew() {
+      if (newForm == null || newForm.IsDisposed) newForm = new NewTicketForm(this, app.AppIcon);
+      if (!newForm.Visible) newForm.Show();
+      if (newForm.WindowState == FormWindowState.Minimized) newForm.WindowState = FormWindowState.Normal;
+      newForm.Activate();
+    }
+
+    public void ShowList(long select) {
+      PendingTicket = 0;
+      if (listForm == null || listForm.IsDisposed) listForm = new TicketsForm(this, app.AppIcon);
+      if (!listForm.Visible) listForm.Show();
+      if (listForm.WindowState == FormWindowState.Minimized) listForm.WindowState = FormWindowState.Normal;
+      listForm.Activate();
+      listForm.Reload(select);
+    }
+
+    // both return null on success or an error message; created gets the new ticket's number
+    public string Create(string subject, string body, bool urgent, out long created) {
+      created = 0;
+      try {
+        var json = new JavaScriptSerializer().Serialize(new Dictionary<string, object> { { "author", Environment.UserName }, { "subject", subject }, { "body", body }, { "urgent", urgent } });
+        var d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(ChatClient.Http("POST", Url("/api/chat/device/ticket"), json, 20000));
+        created = Convert.ToInt64(d["id"]);
+        lock (seen) seen[created] = 0;
+        return null;
+      } catch (Exception e) { return ErrorText(e); }
+    }
+    public string Reply(long id, string body) {
+      try {
+        var json = new JavaScriptSerializer().Serialize(new Dictionary<string, object> { { "author", Environment.UserName }, { "body", body } });
+        ChatClient.Http("POST", Url("/api/chat/device/tickets/" + id + "/reply"), json, 20000);
+        return null;
+      } catch (Exception e) { return ErrorText(e); }
+    }
+    public void Created(long id) {
+      app.Balloon("Ticket #" + id + " sent", "Your IT team has your request. You'll get a notification here when they reply.");
+    }
+  }
+
+  sealed class NewTicketForm : Form {
+    readonly TicketClient client;
+    readonly TextBox subject = new TextBox();
+    readonly TextBox body = new TextBox();
+    readonly CheckBox urgent = new CheckBox();
+    readonly Button send = new Button();
+    readonly Label status = new Label();
+
+    public NewTicketForm(TicketClient client, Icon icon) {
+      this.client = client;
+      Text = "Open a support ticket"; Icon = icon; Width = 480; Height = 470; MinimumSize = new Size(380, 400);
+      StartPosition = FormStartPosition.CenterScreen; Font = new Font("Segoe UI", 9.5f);
+      var head = new Label { Dock = DockStyle.Top, Height = 34, Text = "  Ask your IT support team for help", TextAlign = ContentAlignment.MiddleLeft,
+        BackColor = Color.FromArgb(37, 99, 235), ForeColor = Color.White, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) };
+      var grid = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 6 };
+      grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+      grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+      grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+      grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+      grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+      grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+      grid.Controls.Add(new Label { Text = "What do you need help with?", AutoSize = true, Margin = new Padding(0, 0, 0, 4) });
+      subject.Dock = DockStyle.Fill; subject.MaxLength = 200; subject.Margin = new Padding(0, 0, 0, 10);
+      grid.Controls.Add(subject);
+      grid.Controls.Add(new Label { Text = "Describe the problem (what happens, since when, any error message):", AutoSize = true, Margin = new Padding(0, 0, 0, 4) });
+      body.Multiline = true; body.ScrollBars = ScrollBars.Vertical; body.Dock = DockStyle.Fill; body.MaxLength = 20000;
+      grid.Controls.Add(body);
+      urgent.Text = "It's urgent: I can't work"; urgent.AutoSize = true; urgent.Margin = new Padding(0, 8, 0, 0);
+      grid.Controls.Add(urgent);
+      var row = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Margin = new Padding(0, 8, 0, 0) };
+      send.Text = "Send ticket"; send.AutoSize = true; send.Padding = new Padding(8, 2, 8, 2);
+      var cancel = new Button { Text = "Cancel", AutoSize = true };
+      status.AutoSize = true; status.ForeColor = Color.Firebrick; status.Margin = new Padding(0, 8, 10, 0);
+      row.Controls.Add(send); row.Controls.Add(cancel); row.Controls.Add(status);
+      grid.Controls.Add(row);
+      Controls.Add(grid); Controls.Add(head);
+      AcceptButton = null;
+      send.Click += delegate { DoSend(); };
+      cancel.Click += delegate { Hide(); };
+      Shown += delegate { subject.Focus(); };
+    }
+
+    void DoSend() {
+      string s = subject.Text.Trim(), b = body.Text.Trim();
+      if (s.Length == 0) { status.Text = "Write a short subject."; subject.Focus(); return; }
+      if (b.Length == 0) { status.Text = "Describe the problem."; body.Focus(); return; }
+      bool u = urgent.Checked;
+      send.Enabled = false; status.ForeColor = Color.Gray; status.Text = "Sending...";
+      var t = new Thread(() => {
+        long id;
+        string err = client.Create(s, b, u, out id);
+        BeginInvoke((MethodInvoker)delegate {
+          send.Enabled = true;
+          if (err != null) { status.ForeColor = Color.Firebrick; status.Text = "Couldn't send: " + err; return; }
+          subject.Clear(); body.Clear(); urgent.Checked = false; status.Text = "";
+          Hide();
+          client.Created(id);
+        });
+      });
+      t.IsBackground = true; t.Start();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e) {
+      if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+      base.OnFormClosing(e);
+    }
+  }
+
+  sealed class TicketsForm : Form {
+    readonly TicketClient client;
+    readonly ListBox list = new ListBox();
+    readonly RichTextBox detail = new RichTextBox();
+    readonly TextBox reply = new TextBox();
+    readonly Button send = new Button();
+    readonly Label status = new Label();
+    readonly List<Dictionary<string, object>> tickets = new List<Dictionary<string, object>>();
+
+    public TicketsForm(TicketClient client, Icon icon) {
+      this.client = client;
+      Text = "My support tickets"; Icon = icon; Width = 560; Height = 600; MinimumSize = new Size(420, 460);
+      StartPosition = FormStartPosition.CenterScreen; Font = new Font("Segoe UI", 9.5f);
+      var head = new Panel { Dock = DockStyle.Top, Height = 34, BackColor = Color.FromArgb(37, 99, 235) };
+      head.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "  Support tickets from this computer", TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.White, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) });
+      var newBtn = new Button { Text = "New ticket...", Dock = DockStyle.Right, Width = 100, FlatStyle = FlatStyle.Flat, ForeColor = Color.White };
+      newBtn.FlatAppearance.BorderSize = 0;
+      head.Controls.Add(newBtn);
+      list.Dock = DockStyle.Top; list.Height = 130; list.IntegralHeight = false; list.BorderStyle = BorderStyle.None;
+      detail.Dock = DockStyle.Fill; detail.ReadOnly = true; detail.BorderStyle = BorderStyle.None; detail.BackColor = Color.White; detail.DetectUrls = true;
+      detail.LinkClicked += (s, e) => { try { System.Diagnostics.Process.Start(e.LinkText); } catch { } };
+      var sep = new Panel { Dock = DockStyle.Top, Height = 1, BackColor = Color.Gainsboro };
+      var bottom = new Panel { Dock = DockStyle.Bottom, Height = 96, Padding = new Padding(8) };
+      reply.Multiline = true; reply.Dock = DockStyle.Fill; reply.ScrollBars = ScrollBars.Vertical;
+      send.Text = "Reply"; send.Dock = DockStyle.Right; send.Width = 76;
+      status.Dock = DockStyle.Bottom; status.Height = 18; status.ForeColor = Color.Gray; status.Font = new Font("Segoe UI", 8f);
+      bottom.Controls.Add(reply); bottom.Controls.Add(send); bottom.Controls.Add(status);
+      Controls.Add(detail); Controls.Add(sep); Controls.Add(list); Controls.Add(bottom); Controls.Add(head);
+      list.SelectedIndexChanged += delegate { ShowSelected(); };
+      send.Click += delegate { DoReply(); };
+      newBtn.Click += delegate { client.ShowNew(); };
+    }
+
+    Dictionary<string, object> Selected() { int i = list.SelectedIndex; return i >= 0 && i < tickets.Count ? tickets[i] : null; }
+
+    public void Reload(long select) {
+      long keep = select > 0 ? select : (Selected() != null ? Convert.ToInt64(Selected()["id"]) : 0);
+      status.Text = "Loading...";
+      var t = new Thread(() => {
+        System.Collections.ArrayList data = null; string err = null;
+        try { data = client.Fetch(); } catch (Exception e) { err = TicketClient.ErrorText(e); }
+        if (IsDisposed) return;
+        BeginInvoke((MethodInvoker)delegate {
+          if (err != null) { status.Text = "Couldn't load tickets: " + err; return; }
+          tickets.Clear(); list.Items.Clear();
+          int sel = 0;
+          foreach (Dictionary<string, object> d in data) {
+            if (Convert.ToInt64(d["id"]) == keep) sel = tickets.Count;
+            tickets.Add(d);
+            list.Items.Add("#" + d["id"] + "   " + d["subject"] + "   [" + d["status_text"] + "]");
+          }
+          status.Text = tickets.Count == 0 ? "No tickets yet. Click \"New ticket...\" to ask for help." : "Enter a reply below.";
+          if (tickets.Count > 0) list.SelectedIndex = sel; else detail.Clear();
+        });
+      });
+      t.IsBackground = true; t.Start();
+    }
+
+    void ShowSelected() {
+      var d = Selected();
+      detail.Clear();
+      if (d == null) return;
+      string st = Convert.ToString(d["status"]);
+      reply.Enabled = send.Enabled = st != "closed";
+      detail.SelectionFont = new Font(Font.FontFamily, 11f, FontStyle.Bold);
+      detail.AppendText("#" + d["id"] + " " + d["subject"] + "\n");
+      detail.SelectionFont = Font; detail.SelectionColor = Color.Gray;
+      detail.AppendText("Status: " + d["status_text"] + "\n\n");
+      long newest = 0;
+      foreach (Dictionary<string, object> m in (System.Collections.ArrayList)d["thread"]) {
+        bool tech = Convert.ToBoolean(m["tech"]);
+        if (tech) newest = Math.Max(newest, Convert.ToInt64(m["id"]));
+        DateTime at = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(Convert.ToDouble(m["created_at"])).ToLocalTime();
+        detail.SelectionFont = new Font(Font, FontStyle.Bold);
+        detail.SelectionColor = tech ? Color.FromArgb(37, 99, 235) : Color.FromArgb(22, 101, 52);
+        detail.AppendText(Convert.ToString(m["author"]) + "  ");
+        detail.SelectionFont = Font; detail.SelectionColor = Color.Gray;
+        detail.AppendText(at.ToString("g") + "\n");
+        detail.SelectionColor = Color.Black;
+        detail.AppendText(m["body"] + "\n\n");
+      }
+      client.MarkSeen(Convert.ToInt64(d["id"]), newest);
+      detail.SelectionStart = detail.TextLength; detail.ScrollToCaret();
+    }
+
+    void DoReply() {
+      var d = Selected();
+      string text = reply.Text.Trim();
+      if (d == null || text.Length == 0) return;
+      long id = Convert.ToInt64(d["id"]);
+      send.Enabled = false; status.Text = "Sending...";
+      var t = new Thread(() => {
+        string err = client.Reply(id, text);
+        BeginInvoke((MethodInvoker)delegate {
+          send.Enabled = true;
+          if (err != null) { status.Text = "Couldn't send: " + err; return; }
+          reply.Clear(); Reload(id);
+        });
+      });
+      t.IsBackground = true; t.Start();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e) {
       if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
       base.OnFormClosing(e);
     }
