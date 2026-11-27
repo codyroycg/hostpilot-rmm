@@ -633,10 +633,38 @@ def main():
     except OSError:
         return 0
     global ICONS
-    ICONS = make_icons()
-    TrayApp()
+    try:
+        ICONS = make_icons()
+        TrayApp()
+    except Exception:
+        import traceback
+        tlog('failed to start:\n' + traceback.format_exc())
+        raise
+    session = os.environ.get('XDG_SESSION_TYPE', '?')
+    desktop = os.environ.get('XDG_CURRENT_DESKTOP', '?')
+    if Indicator:
+        tlog('started: %s icon, %s session, desktop %s' % (Indicator.__name__.split('.')[-1], session, desktop))
+    else:
+        tlog('started WITHOUT AppIndicator (old-style tray icon), %s session, desktop %s' % (session, desktop))
+        if 'GNOME' in desktop.upper() or 'KDE' in desktop.upper() or session == 'wayland':
+            # GNOME/KDE on Wayland never show old-style tray icons: say so instead of failing silently
+            tlog('this desktop needs the AppIndicator library (gir1.2-ayatanaappindicator3-0.1); the agent installs it automatically')
     Gtk.main()
     return 0
+
+
+def tlog(msg):
+    """~/.cache/hostpilot-tray/tray.log: which icon type is used and startup errors (for troubleshooting)."""
+    try:
+        os.makedirs(CACHE, exist_ok=True)
+        path = os.path.join(CACHE, 'tray.log')
+        if os.path.exists(path) and os.path.getsize(path) > 200000:
+            os.replace(path, path + '.1')
+        with open(path, 'a') as f:
+            f.write('%s  %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg))
+    except OSError:
+        pass
+    print(msg, file=sys.stderr)
 
 
 ICONS = {}

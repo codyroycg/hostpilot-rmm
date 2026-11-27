@@ -352,6 +352,46 @@ start_tray_sessions() {
       --unit="hostpilot-tray-$uid-$(date +%s)" /usr/bin/python3 "$TRAY_PY" >/dev/null 2>&1 && log "tray started for $user"
   done
 }
+# GNOME (Ubuntu's default desktop) and KDE only show AppIndicator icons; the old XEmbed tray (Gtk.StatusIcon)
+# is invisible there, especially on Wayland. Ubuntu doesn't install the Python bindings for AppIndicator,
+# so the agent adds them once.
+has_indicator() {
+  python3 - >/dev/null 2>&1 <<'PY'
+import gi
+for n in ("AyatanaAppIndicator3", "AppIndicator3"):
+    try:
+        gi.require_version(n, "0.1")
+        __import__("gi.repository." + n)
+        raise SystemExit(0)
+    except (ValueError, ImportError):
+        pass
+raise SystemExit(1)
+PY
+}
+install_indicator() {
+  has_indicator && return 0
+  [ -n "$INDICATOR_TRIED" ] && return 1
+  INDICATOR_TRIED=1
+  log "tray: installing the AppIndicator library (the icon is invisible on GNOME/KDE without it)"
+  local p
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    for p in gir1.2-ayatanaappindicator3-0.1 gir1.2-appindicator3-0.1; do
+      timeout 600 apt-get install -y -q "$p" >/dev/null 2>&1 && break
+      # stale package lists: refresh once, then retry
+      [ -z "$APT_UPDATED" ] && { APT_UPDATED=1; timeout 600 apt-get update -q >/dev/null 2>&1; timeout 600 apt-get install -y -q "$p" >/dev/null 2>&1 && break; }
+    done
+  elif command -v dnf >/dev/null 2>&1; then
+    for p in libayatana-appindicator-gtk3 libappindicator-gtk3; do timeout 600 dnf install -y -q "$p" >/dev/null 2>&1 && break; done
+  elif command -v zypper >/dev/null 2>&1; then
+    for p in typelib-1_0-AyatanaAppIndicator3-0_1 typelib-1_0-AppIndicator3-0_1; do timeout 600 zypper -n -q install "$p" >/dev/null 2>&1 && break; done
+  elif command -v pacman >/dev/null 2>&1; then
+    timeout 600 pacman -S --noconfirm --needed libayatana-appindicator >/dev/null 2>&1
+  fi
+  if has_indicator; then log "tray: AppIndicator library installed"; return 0; fi
+  log "tray: couldn't install the AppIndicator library; the icon may not show on GNOME/KDE"
+  return 1
+}
 install_tray() { # <version>; empty = icon disabled on the server
   local v="$1"
   if [ -z "$v" ]; then [ -e "$TRAY_PY" ] && { remove_tray; log "tray icon removed (disabled on server)"; }; return 0; fi
@@ -360,6 +400,10 @@ install_tray() { # <version>; empty = icon disabled on the server
     log "tray icon skipped: python3 with GTK 3 (python3-gi) is not installed"; return 0
   fi
   local changed=0
+  if ! has_indicator && install_indicator; then
+    # icons already running fell back to the invisible old-style tray: restart them
+    pkill -f "$TRAY_PY" 2>/dev/null; changed=1
+  fi
   if [ "$(sha256sum "$TRAY_PY" 2>/dev/null | cut -c1-12)" != "$v" ]; then
     mkdir -p "$TRAY_DIR" && chmod 755 "$TRAY_DIR"
     curl -fsS --max-time 60 -o "$TRAY_PY.new" "$SERVER/agent/tray-linux.py" || { rm -f "$TRAY_PY.new"; return 0; }
