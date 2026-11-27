@@ -22,7 +22,7 @@ function loadSeedScripts() {
       meta[m[1].toLowerCase()] = m[2].trim();
     }
     return [{
-      name: meta.name || f, category: meta.category || 'General', description: meta.description || '',
+      file: f, name: meta.name || f, category: meta.category || 'General', description: meta.description || '',
       timeout: Number(meta.timeout) || 300, shell, body: lines.slice(i).join('\n'),
     }];
   });
@@ -266,12 +266,30 @@ export function audit(username, action, detail = '') {
     typeof detail === 'string' ? detail : JSON.stringify(detail));
 }
 
-// Seed the script library on first run
-if (get('SELECT COUNT(*) AS n FROM scripts').n === 0) {
-  tx(() => {
-    for (const s of loadSeedScripts()) {
-      run('INSERT INTO scripts(name, description, category, shell, body, timeout, created_by, updated_at) VALUES(?,?,?,?,?,?,?,?)',
-        s.name, s.description, s.category, s.shell, s.body.trim() + '\n', s.timeout || 300, 'system', Date.now());
-    }
-  });
+// Seed the script library. Each built-in script is added once (tracked by file name in settings.seeded_scripts),
+// so new built-ins reach existing servers, while ones an admin deleted or renamed don't come back.
+{
+  // the built-ins that shipped before tracking existed: an existing server already had the chance to get them
+  const ORIGINAL = ['lin-01-system-info.sh', 'lin-02-pending-updates.sh', 'lin-03-apply-updates.sh', 'lin-04-top-processes.sh',
+    'lin-05-failed-units.sh', 'lin-06-disk-usage.sh', 'lin-07-docker.sh', 'lin-08-reboot.sh', 'lin-09-security.sh',
+    'win-01-system-info.ps1', 'win-02-pending-updates.ps1', 'win-03-install-updates.ps1', 'win-04-top-processes.ps1',
+    'win-05-cleanup-temp.ps1', 'win-06-defender.ps1', 'win-07-services-stopped.ps1', 'win-08-reboot.ps1',
+    'win-09-event-errors.ps1', 'win-10-local-admins.ps1'];
+  const row = get("SELECT value FROM settings WHERE key='seeded_scripts'");
+  let seeded;
+  try { seeded = new Set(row ? JSON.parse(row.value) : []); } catch { seeded = new Set(); }
+  if (!row && get('SELECT COUNT(*) AS n FROM scripts').n > 0) ORIGINAL.forEach((f) => seeded.add(f));
+  const fresh = loadSeedScripts().filter((s) => !seeded.has(s.file));
+  if (fresh.length || !row) {
+    tx(() => {
+      for (const s of fresh) {
+        if (!get('SELECT id FROM scripts WHERE name=? AND shell=?', s.name, s.shell)) {
+          run('INSERT INTO scripts(name, description, category, shell, body, timeout, created_by, updated_at) VALUES(?,?,?,?,?,?,?,?)',
+            s.name, s.description, s.category, s.shell, s.body.trim() + '\n', s.timeout || 300, 'system', Date.now());
+        }
+        seeded.add(s.file);
+      }
+      run("INSERT INTO settings(key, value) VALUES('seeded_scripts', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", JSON.stringify([...seeded]));
+    });
+  }
 }
