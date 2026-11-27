@@ -1391,8 +1391,8 @@ async function devOverview(el, a) {
         <td class="small muted">${esc(s.start)}</td><td class="right">${s.status === 'running' ? badge('running', 'ok') : s.status === 'missing' ? badge('not installed', 'warn') : badge(s.status, 'bad')}</td></tr>`).join('')}</tbody></table>`
       : '<div class="small muted">No services are monitored on this device. Add them in Settings (all devices), on this device\'s Settings tab, or with a "Service running" policy rule. You get an alert when a monitored service stops.</div>'}</div>
     <div class="card" id="ov-assign"><h3>Contact, roles & patching</h3><div class="muted small">Loading…</div></div>
-    ${chartCard('perf', 'Performance')}
-    ${chartCard('net', 'Network traffic')}
+    ${chartCard('perf', 'Performance', a.online)}
+    ${chartCard('net', 'Network traffic', a.online)}
     ${a.notes ? `<div class="card"><h3>Notes</h3><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>` : ''}
   </div>`;
   const perf = chartPanel(a, 'perf', [['cpu', 'CPU', 'var(--c1)'], ['mem', 'Memory', 'var(--c2)'], ['disk', 'Fullest disk', 'var(--c3)']]);
@@ -1433,8 +1433,9 @@ function liveUtilization(a) {
   safe();
 }
 
-const chartCard = (id, title) => `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">${title}</h3>
-  <select id="${id}-range" style="width:auto"><option value="live">1 minute (live)</option><option value="1">1 hour</option><option value="24" selected>24 hours</option><option value="168">7 days</option></select></div>
+/** Range defaults to live while the device is online (live needs the device), otherwise 24 hours. */
+const chartCard = (id, title, live = false) => `<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:8px"><h3 style="margin:0">${title}</h3>
+  <select id="${id}-range" style="width:auto"><option value="live"${live ? ' selected' : ''}>1 minute (live)</option><option value="1">1 hour</option><option value="24"${live ? '' : ' selected'}>24 hours</option><option value="168">7 days</option></select></div>
   <div id="${id}-chart" class="muted">Loading…</div></div>`;
 
 /** Wires a chartCard: history from /metrics, or live 2-second samples (shared device sampler) for "1 minute". */
