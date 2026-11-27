@@ -217,6 +217,16 @@ export const TASKS = {
       return { subnet: need(S(a.subnet, 20), 'Subnet'), community };
     },
   },
+  // wait > 0: only sent to online devices (a queued reboot mustn't fire hours later when an offline device returns)
+  'power.reboot': {
+    title: (a) => `${a.mode === 'shutdown' ? 'Shut down' : 'Restart'} ${a.delay === '0' ? 'now' : `in ${a.delay} min`}`, timeout: 120, wait: 30,
+    args: (a) => {
+      const delay = Math.round(Number(a.delay ?? 0));
+      if (!Number.isFinite(delay) || delay < 0 || delay > 1440) throw new HttpError(400, 'Delay must be 0-1440 minutes');
+      return { mode: oneOf(S(a.mode || 'restart'), ['restart', 'shutdown'], 'mode'), delay: String(delay), message: noCtl(a.message, 200, 'Message') };
+    },
+  },
+  'power.cancel': { title: () => 'Cancel scheduled restart / shutdown', timeout: 60, wait: 30, args: () => ({}) },
   'roles.detect': { internal: true, title: () => 'Detect server roles', timeout: 300, args: () => ({}) },
   'screenshot.take': { internal: true, title: () => 'Take a screenshot', timeout: 120, args: (a) => ({ url: S(a.url) }) },
   'net.wake': {
@@ -249,7 +259,7 @@ function argsBlock(args, platform) {
 }
 
 // macOS: a task uses <task>.mac.sh when present, otherwise the Linux .sh only if it is known to be portable
-const MAC_PORTABLE = new Set(['files.get', 'files.put', 'files.rename', 'files.mkdir', 'hardware.printers', 'net.wake']);
+const MAC_PORTABLE = new Set(['files.get', 'files.put', 'files.rename', 'files.mkdir', 'hardware.printers', 'net.wake', 'power.reboot', 'power.cancel']);
 function templateFor(task, platform) {
   if (platform === 'windows') return expand(`${task}.ps1`);
   if (platform === 'macos') return expand(`${task}.mac.sh`) ?? (MAC_PORTABLE.has(task) ? expand(`${task}.sh`) : null);

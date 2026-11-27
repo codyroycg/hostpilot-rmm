@@ -804,7 +804,7 @@ function netDeviceModal(d, onSaved) {
       <div class="field"><label>Type</label><select name="type"><option value="auto">Automatic (${esc((NET_TYPE_INFO[d.type] || [''])[0])})</option>
         ${NET_ORDER.map((t) => `<option value="${t}" ${d.type_manual && d.type === t ? 'selected' : ''}>${NET_TYPE_INFO[t][0]}</option>`).join('')}</select></div></div></form>` : ''}`,
   { wide: true, foot: can('tech') ? `<button class="btn danger" id="nd-forget">Forget device</button><span class="grow"></span>
-      ${d.mac ? `<button class="btn" data-action="wake" data-net="${d.id}" title="Send a Wake-on-LAN magic packet">⏻ Wake up</button>` : ''}
+      ${d.mac ? `<button class="btn" data-action="wake" data-net="${d.id}" title="Power on with a Wake-on-LAN magic packet">⏻ Power on</button>` : ''}
       <button class="btn" data-action="close-modal">Close</button><button class="btn primary" form="nd-form">Save</button>` : '<button class="btn" data-action="close-modal">Close</button>' });
   $('#nd-form', m)?.addEventListener('submit', guard(async (e) => {
     e.preventDefault();
@@ -1347,7 +1347,9 @@ async function pageDevice(view, id, tab = 'overview') {
       <div class="muted small" style="margin-top:4px">${osCell(a)} · ${classBadge(a.device_class)} · ${a.client_name ? `<a href="#/clients/${a.client_id}">${esc(a.client_name)}</a>` : 'No client'} · ${a.maintenance ? badge('maintenance', 'warn') : a.online ? badge('online', 'ok') : badge(`offline · ${fmtAgo(a.last_seen)}`, 'bad')}</div></div>
       <div class="row">${can('tech') && win ? `<a class="btn primary" href="/remote.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Remote control</a>${term('powershell', 'PowerShell')}${term('cmd', 'Command Prompt')}` : ''}
       ${can('tech') && !win ? `<a class="btn primary" href="/terminal.html#${encodeURIComponent(a.id)}" target="_blank" rel="noopener">Terminal</a>` : ''}
-      ${can('tech') ? `<button class="btn${a.online ? '' : ' primary'}" data-action="wake" data-id="${a.id}" title="Send a Wake-on-LAN magic packet from another HostPilot device on the same network">⏻ Wake up</button>` : ''}
+      ${can('tech') ? `<button class="btn${a.online ? '' : ' primary'}" data-action="wake" data-id="${a.id}" title="Power on with Wake-on-LAN: a magic packet sent from another HostPilot device on the same network">⏻ Power on</button>` : ''}
+      ${can('tech') ? `<button class="btn" data-action="reboot" data-id="${a.id}" ${a.online ? '' : 'disabled'} title="${a.online ? 'Restart this device now or after a warning' : 'The device is offline'}">↻ Reboot</button>` : ''}
+      ${can('tech') ? `<button class="btn" data-action="shutdown" data-id="${a.id}" ${a.online ? '' : 'disabled'} title="${a.online ? 'Shut this device down now or after a warning' : 'The device is offline'}">⏼ Shut down</button>` : ''}
       ${can('tech') ? `<button class="btn" data-action="run-on" data-ids="${a.id}">Run script</button><button class="btn" data-action="refresh-inv" data-id="${a.id}">Refresh inventory</button>` : ''}</div></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/devices/${a.id}/${k}" class="${k === tab ? 'active' : ''}">${l}</a>`).join('')}</nav>
     <div id="tab"></div>`;
@@ -4257,7 +4259,41 @@ Object.assign(ACTIONS, {
   'new-article': (el) => articleModal(null, { agentId: el.dataset.agent || null }),
   'new-credential': (el) => credentialModal(null, { agentId: el.dataset.agent || null, onSaved: () => router() }),
   'api-keys': () => apiKeysModal(),
+  reboot: async (el) => rebootModal(await api('GET', `/api/agents/${el.dataset.id}`)),
+  shutdown: async (el) => rebootModal(await api('GET', `/api/agents/${el.dataset.id}`), 'shutdown'),
 });
+
+// ---------------- reboot / shut down ----------------
+function rebootModal(a, mode = 'restart') {
+  const off = mode === 'shutdown';
+  const verb = off ? 'shut down' : 'restart';
+  const who = a.logged_user ? `${esc(a.logged_user)} is signed in` : 'Nobody appears to be signed in';
+  const m = openModal(`${off ? 'Shut down' : 'Reboot'} ${a.hostname}`, `<form id="rb-form">
+      <p class="small muted">${who}${a.reboot_required && !off ? ` · ${badge('restart required by updates', 'warn')}` : ''}${a.roles?.length ? ` · server roles: ${a.roles.map((r) => esc(r.label)).join(', ')}` : ''}</p>
+      <div class="field"><label class="check"><input type="radio" name="when" value="now" ${a.logged_user ? '' : 'checked'}> ${off ? 'Shut down' : 'Restart'} now</label>
+        <label class="check"><input type="radio" name="when" value="later" ${a.logged_user ? 'checked' : ''}> Warn the user and ${verb} in
+          <input type="number" name="delay" min="1" max="1440" value="5" style="width:80px"> minutes</label></div>
+      <div class="field"><label>Message to the user (optional)</label><input type="text" name="message" maxlength="200" placeholder="e.g. ${off ? 'Shutting down for the weekend' : 'Restarting to finish IT maintenance'}. Please save your work."></div>
+      <p class="small muted">Unsaved work in open programs can be lost. ${a.platform === 'windows' ? 'Windows shows the message and a countdown.' : 'Linux and macOS send the message to logged-in terminals.'}
+        ${off ? '<br><strong>The device goes offline.</strong> To turn it back on remotely, use <strong>⏻ Power on</strong> (needs Wake-on-LAN enabled in its BIOS and network adapter).' : ''}</p></form>`,
+  { foot: `<button class="btn" id="rb-cancel" title="Stop a restart or shutdown that was scheduled earlier">Cancel scheduled ${verb}</button><span class="grow"></span><button class="btn" data-action="close-modal">Close</button><button class="btn danger solid" form="rb-form">${off ? 'Shut down' : 'Reboot'}</button>` });
+  $('#rb-form', m).addEventListener('submit', guard(async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const delay = f.get('when') === 'now' ? 0 : Number(f.get('delay'));
+    if (f.get('when') === 'later' && !(delay >= 1 && delay <= 1440)) { toast('Enter 1 to 1440 minutes', 'error'); return; }
+    $('button[form=rb-form]', m).disabled = true;
+    try {
+      const j = await deviceTask(a.id, 'power.reboot', { mode, delay, message: f.get('message') || '' });
+      closeModal();
+      toast(cleanErr(j.stdout) || (delay ? `${off ? 'Shutdown' : 'Restart'} scheduled in ${delay} min` : off ? 'Shutting down now' : 'Restarting now'));
+    } finally { const b = $('button[form=rb-form]', m); if (b) b.disabled = false; }
+  }));
+  $('#rb-cancel', m).addEventListener('click', guard(async () => {
+    const j = await deviceTask(a.id, 'power.cancel', {});
+    closeModal(); toast(cleanErr(j.stdout) || 'Scheduled restart / shutdown cancelled');
+  }));
+}
 
 // ---------------- boot ----------------
 (async () => {
