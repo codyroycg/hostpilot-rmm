@@ -67,40 +67,33 @@ def ago(ms):
     return time.strftime('%Y-%m-%d %H:%M', time.localtime(ms / 1000))
 
 
+# Blue rounded square with a white "H" and a status dot, one 64x64 PNG per state. Embedded so the icon
+# doesn't need the cairo Python module (python3-gi-cairo), which isn't installed everywhere.
+ICON_PNG = {
+    'connected': 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAARXSURBVHhe7VtNSBRRHPfYsaM3JXf7gKCgQ9AhvAgdukSXiGjXmQ5LIIgURkhYEEIYRh0kBA0q6mBGeDCMkKLQyI/oQyMVSaltd1Zdv9LVfC/+2+zum/97O+7O248Zmx/8LrvvvXm/38z83/89/lNS4sJFVijzTe2oULVKoFcJ+b2q1lgwKiF/4towDzy3vAIu7lEjT72qtupVNWoHwnw8yq8AnmtOAW57FG0EX9xO9KjhsQo1dAzPXRqe6nAtvpjN2YI1WIZH1ToEF7A/Fa1HOj54qkOXuIEdRI+qPcKaMga8S3hAJ9JycLR7wMuCwTLf/E6szxTgmmAg5/JcpAlrNIVXCfdxgziYsDxijWkBj4udkpxccbdP24u1ChFPbQUDOJ5KyI+1CuFVwqe4ztuAsKRjrUI4MOvLlI1YqxD6jgt33g50DcBahZA14EjdLD1xbd7AqstzXDvMA+cjXD8gbifBwhjQ+GCJYvQOxbh2mCBWBNxOgq4BWKsQrgGuAa4BrgGCzhnTNcA1gDdg8Ns6l+BgXmhbxN3iwONLsHgGyACPL0HXAKxVCNeAPBkAgdCMECdEwONLsHgG/PergGuAa0B+DNgfiNAzN6Ic4XfcdlsZUN++RF8Mx+jaOsHNk4D/r9xfYvs53wC4u6PTG7iJKSaDf6jasgD9nW3A9cfL+K84Jn7/pAPRsSS/LH/HTeJ49SnWj7UKYUcDnrxZxT/T9h/PadVwPd319izHo4N19NZ0F13bNOYWhJAeSql50YTdDGjuNN55uOMnP17lRIsIBg0vThj6E0LMiyZkDQjcWeCyvJtdK1w7TDg6x/2Gxo3ve2foNd3Xr3JCt2LrTLdhHEJI+qIJWQNySTbgwZ23Ij5BiA+MAUFKqbhowi51QbCEscj0sU/Hw+9r6MLGCmuCuGhCr/rkJlRoDnxNBTAIeFiQFV4cb2MNEBdN2KE+4FBNxJDkQFTHYqwQXiH2KaCU8kUTe3zBcjyhQhMSngRgXcdCZNg7O8gaIC6aKHaFWO3d1Plgt9bPiZAhWhHERRPFXgnYAPgw+JITIUNIkBiI02O9UCqIJ1YowmYnAVj7sQgZZmQAoJilMmwMgEwOi5AhvFIMxDEgAf27AG6C+WZl/VxyhpDPH3wX4IRY5cyaxhpQiTUbANXWxQqIbBbYMHmPE2KFxz80JMeEbBDrFSIeD4pQOXr7WWq9Dsei8UwOC8qGkAOwW2VCSAfWagqoty1kBSkkQ+HoZnLCsH5jUdmQXf4IIbC/5pOgrVDmC5X++4AiPI8nnA/iQxCrr4J/tNkwDiFE/osSPWWGfCGvHJ3eSG3j9GUx06AIj71gKzyy5aGInQCT1SedBMSE05+bOMEs0xyGTFFKy/E1bA/YuxNC+gxqKI0vaZApQnKTIOwc4ewAQzfReeJZwB5eD2BZgRDS6qjH3gyU0lJYwggh4kNEHfA/nP9ZivZOAWRykM9jEkJy//Gki22Ov0pfnovk9v+LAAAAAElFTkSuQmCC',
+    'disconnected': 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAARSSURBVHhe7VtPSBRRGPfYsaM3BXerQ9ChWycPBuHJLtJBWHcnUAJBMjA7hAQRZKHUISJIpMAOWYQHqUAJhDpkCsEaZQh72T+z/l1tXf98L75pdn3zvee4O8/dnbH5we+y+96b9/vNzPe+9/impsaHj5JQF1o80aDpjchgJNke1PT+ijGSbM9fG+dB51ZW4MUDWvptUNOzQU1nbiDOJxBJdNK5HinQ7UBEn6UXdxMDWmq+QUteonNXRiCc6qYXczkHqQbHCGj6sOQC7mdEn1COD4Fw8qYwsIcY0PRRqqlo4LtEB/QiHQdHtwe8EhivC62cpPpsga5JBvIur6bvUY22CEZSU8IgHiYuj1TjgcDHxU1JzlHxVEg/Q7VKYaS2kgE8z0iynWqVIhhJXRE6HwPikk61SuHBrK9Y9lOtUpg7Ltr5ONA3gGqVQtWAC9eX2OU7KxZevLUstKM8dy0t9EPSdgqsjAH9LzOM4sNMTmhHiWJloO0U6BtAtUrhG+Ab4BvgGyDpXDR9A3wDRAO+/twWEhzKG8/WaTcDdHwFVs8AFdDxFegbQLVK4RtQJgMwENoR44QMdHwFVs+A/34V8A3wDSiPAWc706zt/qpA/J22PVYG9D7PsI/fcmxrG2jzAvD/2y8yfD/vG4B3NxrboU1s8Tu+y7TBNezvbQPuvtqgfxnYjcXYztxcgbsLC7SJgU/fc5+pVincaMDYdJb+zLbGxth6OMxWmpoErrW1sezICINcztIHACYYY/ZFE24z4MFr653HO57p6hJEy4gG7USjlv4AYF80oWpA5+M1Ict7+GZTaEeJR+e038wv6/uee/+erTY3C0IPY3Z01DIOABxcNKFqwFGSD3h4552IzxPjA2dAnDEmL5pwS10QLmE8in3sD+JaayuDzP6YACAvmjCrPoUJVZpffuxvjjDgUUFOuDkwwBsgL5pwQ33A+a60JcnBqE7FOCG+QvxTwBgTiyZOh+L1dEKVJiY8eeC6ToWocHt6mjdAXjRR7Qqx7qf754O5yUlBhArJiiAvmqj2SsAHwK3xcUGECjFB4iBPj81CqTidWKWIm508cO2nIlRYlAGIapbK8DEAMzkqQoX4SnGQx4A8zO8ChAmWm429y4UZYj6/2tIiCHHKvUSCN6CRarYAq62rFRD5LPDP0JAgxAnXOzoKY2I2SPVKYcSDKlSOPnq3WZjs3tKSkclRQaUQcwB+qwwAw1SrLbDetpIVpJgMpVb3ChPG9ZuKKoX88gcAuL8Wk6DDUBdK1v77gCK1QidcDtJDEKevwkZfn2UcAFD/osRMmTFfKCujsZ15fvLGlrjIoIiPvWQrPHvooYibgJM1J10AxoRMT48gmOcBhyGLjLF6eg3XA/fuADBlUYNGJBJGpojJTZ64c8SzAwrTRO+J54F7eDOAlQQAeOKpx94OjLFaXMIAQH6IaAL/x/M/R9HeK8BMDvN5SgA4+o8nfRxz/AWt7NsCLa2fJwAAAABJRU5ErkJggg==',
+    'stopped': 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAARQSURBVHhe7VtNaBNBFO7Ro8feWmiiHgQP3jz1Inj15kFIm/VQBKGIUPEgRRBBlIIKRQotWH8qVItFqFRKLUptpbVKsNXWUinFNNn0N/1LW9/Ii5tk9s0kTXbysxv3g++SzMzO9+3umzfD24oKFy5yQpVv7lCNptcivf5QnVfTm4tGf6gucW2cB51bQYEX92iRHq+mb3s1ndmBOB+Pf7GBzjWvQLc9fn2CXtxO9GjhqRotdIbOXRme+nAjvZjN2UI1WIZH0zskF7A//Xqfcnzw1IeuCgM7iB5Nf0Y1ZQ18l+iATqTl4Gj3gJcDg1W+lcNUX0aga5KBnMsLkVtUY0Z4/eFBYRAHE5dHqjEt8HGxU5KTLx7x6ceoViniqa1kAMfTH6qjWqXw+sPnhM5lQFzSqVYpHJj1ZctmqlUKY8dFO5cDXQOoVilUDTh1eYmdvbFi4ulry0I7yhMXI0I/JG2nwOIY0Pw4yij6x2NCO0oUKwNtp0DXAKpVCtcA1wDXANcASees6RrgGiAaMDa9KyQ4lFfa1mm3OOj4CiydASqg4yvQNYBqlcI1oEAGYCDMRIwTMtDxFVg6A/77VcA1wDWgMAYcb4iw87dXBeLvtG1ZGdDUHmVvP8fYzi7Q5kng/9c7o3w/5xuAd3dyfo82yYjZ4D7TWtawv7MNuNm1Qf+KY3l1gy0sLiWpL8tT6qFA7CPVKoUdDXjxYZv+zL5M/mJPet+zB51vBD7qGWKjX2fY/v4fUx8A6GOMZS6asJsBd7rNdx7veHffiCBaRjQoqJvHBYDMRROqBjTcXxOyvLsvN4V2lHh0TvuNz5jf96mfC6z1ab8g9CCOBWZN4wBA+qIJVQPyST7g4Z23Ij5BjA+cAUHGmLxowi51QbiE8cj2sU/H9u5BthNLGQoA8qIJo+pTmFCxOfI9tTnCgEcFWeHAcIA3QF40YYf6gJOXIqYkB6M6FWOF+ArxTwFjTCyaOOoLVtMJFZuY8CSA6zoVosLZ+RBvgLxootQVYo0PU8nM9NxvQYQKyYogL5oo9UrAB8DAj3lBhAoxQeIgT4+NQqkgnVixiJudBHDtpyJUmJUBiFKWyvAxADM5KkKF+EpxkMeABIzvAoQJFpq1TcvJGWI+3/Z8QBBilevRLd6AWqrZBKy2LlVA5LPAd6PfBCFW2PV6ODkmZoNUrxTxeFCCytF7rzaTk93c2olnclRQLsQcgN8qA0AH1ZoRWG9bzApSTIbCq6ntLK7fVFQu5Jc/AMD9tZgEHYQqX6jy3wcU4RU64UKQHoJYfRV6B8ZM4wCA+hclRsqM+UJBOTm/N8VPHpfFbIMiPvaSrfDEgYcidgJO1ph0EhgTevo/CYJ5pjkMmWOMVdNr2B64dweAQZMaxuJLGmaKmNwkiDtHPDugMEx0nngeuIc3AlhOAIBWRz32mcAYq8QlDADkh4gG8H88/7MU7Z0CzOQwn6cEgPx/POmizPEX/0NsCyeqzmUAAAAASUVORK5CYII=',
+    'updating': 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAARGSURBVHhe7VtPSBRhFPfYsaM3BWerQ9ChS3QIL0LQyVMdotUdDyIEEoHRIaSIKAqhDhFCEgV5KCMIBCNEKozwTyCoGKVIuO7O5r9NdFx9L942uzvzvm/H3Zn9M2Pzg9/F/b5v3vvNzHvv+3xTUxMgQFGoC88falC1RmIoEmsJqVp3xRiJtWSuTXZw28oKuriiJt6EVG0rpGroBZI9SmS5ndtaUpDaSkSb5Bf3EhU1PtOgxs5y211DaY138ot5nD3cB8dQVK1PcgHvM6INuo4PSmvsmrCwj6io2kvuU8Ggd4kv6Ec6Do5eD3hFMFoXXj3M/bMFqSZZyL9sS9zhPtoiFIkPC4v4mJQeuY95QY+Ll4qcUvFIWDvGfZUiXdpKFvA9I7EW7qsUoUj8gjD5AJBSOvdVCh9WfYWym/sqhbHj4pMPAgMBuK9SuBXg9JXf2Hxz1cKm6yvCOM4THQlhHpGPc8HKCND9IokcQ+O6MI6TnJWBj3PBQADuqxSBAIEAgQCBAJLJBTMQIBBAFGBsbkcocDiv9m7waWnw9V2wegK4AV/fBQMBuK9SBAKUSQAKhHakOCEDX98FqyfAf58FAgECAcojwPH2BF68tyaQ/s7HHigBup4m8f2Ejts7wIdnQb/feJ40z/O/AHR3pxdTfIgtfkR3Ue1Zp/n+FuB2/x/+UxoLm4DjK3tZzm3In4qRKX2U+yqFFwV4/WmL/xn7F3fx/KiOpz5sC2z+rGPvzxTqe9Y5ADCIiPZNE14T4P4r652nO942tiM4LSMJNLVmVQEA7Jsm3ArQ/mhdqPIeDGwK4zjp6JzPG/9ufd/fLe3imWHR0f34bMG6DgDkb5pwK0ApaQ54dOedOJ8hxQeTAFFElDdNeKUviFKYGYU+9vl47qOOSdODAADypgmj61MwqNL8MpvbHFHA4w454a3pnAIAIG+a8EJ/wMnLCUuRQ1GdO+OE9AqZnwJEFJsmjoaj9dygSpMKngwor3NH3HAkbskK8qaJaneIdT7JnQ8OLZfm8c+QZQR500S1M4E5AA78Kq0AVCCZIC+PjUapKDesUqTNTgaU+7kTbliQAIRqtsqYYwBVctwJN6RXygR5DMjA+C5AMLDcbOxayVpI9XzTSGmyAHFpy7JZauQ+W0Dd1tUKiOYq8O5sSnDECS99zdUWVA1yf6VIx4MqdI4+fLuZNTahQ7qS4w4VQ6oBzFtlAOjjvtqC+m0r2UFKxVDctJOj/M2dKobm9AcAtL8Wi6D9UBeO1f77gCK+yg0uB/khiNNXofOb9X8OAOD+ixKjZKZ6oaycXkzNmI2ntFhoUKTHXrIVntz3UMRLIGMNo7OgmNAxYb87zHMYMo+I9fwangft3QFg2OINYjqlUaVIxU2GtHOkswMOQ0T/OW8G7eGNAFYUAOCxrx57OyBiLaUwAJAfIhqg3+n8z1G09wuokqN6nhMASv/xZIADjr+77GmlUHC6sAAAAABJRU5ErkJggg==',
+}
+
+
 def make_icons():
-    """Blue rounded square with a white "H" and a status dot, one PNG per state (cairo ships with PyGObject)."""
-    import cairo
+    import base64
     os.makedirs(CACHE, exist_ok=True)
     paths = {}
-    for state, (r, g, b) in COLORS.items():
+    for state, data in ICON_PNG.items():
         path = os.path.join(CACHE, 'hostpilot-%s.png' % state)
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 64, 64)
-        cr = cairo.Context(surf)
-        x, y, w, h, rad = 2, 2, 54, 54, 13
-        cr.new_sub_path()
-        cr.arc(x + w - rad, y + rad, rad, -math.pi / 2, 0)
-        cr.arc(x + w - rad, y + h - rad, rad, 0, math.pi / 2)
-        cr.arc(x + rad, y + h - rad, rad, math.pi / 2, math.pi)
-        cr.arc(x + rad, y + rad, rad, math.pi, 3 * math.pi / 2)
-        cr.close_path()
-        cr.set_source_rgb(0.15, 0.39, 0.92)
-        cr.fill()
-        cr.set_source_rgb(1, 1, 1)
-        cr.select_font_face('Sans', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(34)
-        ext = cr.text_extents('H')
-        cr.move_to(x + (w - ext.width) / 2 - ext.x_bearing, y + (h - ext.height) / 2 - ext.y_bearing)
-        cr.show_text('H')
-        cr.arc(48, 48, 13, 0, 2 * math.pi)
-        cr.set_source_rgb(1, 1, 1)
-        cr.fill()
-        cr.arc(48, 48, 10, 0, 2 * math.pi)
-        cr.set_source_rgb(r, g, b)
-        cr.fill()
-        surf.write_to_png(path)
+        raw = base64.b64decode(data)
+        try:
+            with open(path, 'rb') as f:
+                same = f.read() == raw
+        except OSError:
+            same = False
+        if not same:
+            with open(path, 'wb') as f:
+                f.write(raw)
         paths[state] = path
     return paths
-
 
 def notify(title, body):
     try:
@@ -624,6 +617,14 @@ def main():
             print("The HostPilot agent isn't installed or running: %s" % e)
             return 1
         print('Update requested. The agent will update within about 30 seconds.')
+        return 0
+    # the login screen (gdm, gdm-greeter, lightdm, sddm) isn't a user: no icon there
+    import pwd
+    try:
+        me = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        me = ''
+    if me.startswith(('gdm', 'lightdm', 'sddm')) or os.environ.get('XDG_SESSION_CLASS') == 'greeter':
         return 0
     # one icon per user session
     run_dir = os.environ.get('XDG_RUNTIME_DIR') or '/tmp'

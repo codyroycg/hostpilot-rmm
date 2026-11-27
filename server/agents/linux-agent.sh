@@ -322,7 +322,13 @@ set_status() {
 }
 
 # ---------------- desktop tray icon ----------------
-has_desktop() { ls /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop >/dev/null 2>&1; }
+# Each folder is checked on its own: Ubuntu 25.10+ has no X11 sessions (no /usr/share/xsessions), and
+# "ls a b" fails when either is missing.
+has_desktop() {
+  local f
+  for f in /usr/share/wayland-sessions/*.desktop /usr/share/xsessions/*.desktop; do [ -e "$f" ] && return 0; done
+  return 1
+}
 remove_tray() {
   pkill -f "$TRAY_PY" 2>/dev/null
   rm -rf "$TRAY_DIR" "$TRAY_DESKTOP"
@@ -335,6 +341,8 @@ start_tray_sessions() {
   for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
     type="$(loginctl show-session "$sid" -p Type --value 2>/dev/null)"
     case "$type" in x11|wayland) ;; *) continue ;; esac
+    # only people who signed in (class "user"), not the login screen (class "greeter", e.g. gdm-greeter)
+    [ "$(loginctl show-session "$sid" -p Class --value 2>/dev/null)" = user ] || continue
     uid="$(loginctl show-session "$sid" -p User --value 2>/dev/null)"; user="$(loginctl show-session "$sid" -p Name --value 2>/dev/null)"
     [ -n "$uid" ] && [ "$uid" -ge 1000 ] 2>/dev/null || continue
     # copy the display variables from one of the user's GUI processes
@@ -347,63 +355,76 @@ start_tray_sessions() {
         break
       fi
     done
-    [ -n "$envs" ] || continue
-    systemd-run --quiet --collect --uid="$uid" --gid="$(id -g "$uid")" --setenv=USER="$user" $envs \
-      --unit="hostpilot-tray-$uid-$(date +%s)" /usr/bin/python3 "$TRAY_PY" >/dev/null 2>&1 && log "tray started for $user"
+    [ -n "$envs" ] || { log "tray: no display found for $user's session yet (the icon starts at their next sign-in)"; continue; }
+    if systemd-run --quiet --collect --uid="$uid" --gid="$(id -g "$uid")" --setenv=USER="$user" $envs \
+      --unit="hostpilot-tray-$uid-$(date +%s)" /usr/bin/python3 "$TRAY_PY" >/dev/null 2>&1; then log "tray started for $user"
+    else log "tray: couldn't start the icon for $user (systemd-run failed)"; fi
   done
 }
+# What the icon needs: python3 with PyGObject, the GTK 3 introspection data, and an AppIndicator library.
 # GNOME (Ubuntu's default desktop) and KDE only show AppIndicator icons; the old XEmbed tray (Gtk.StatusIcon)
-# is invisible there, especially on Wayland. Ubuntu doesn't install the Python bindings for AppIndicator,
-# so the agent adds them once.
-has_indicator() {
-  python3 - >/dev/null 2>&1 <<'PY'
-import gi
-for n in ("AyatanaAppIndicator3", "AppIndicator3"):
-    try:
-        gi.require_version(n, "0.1")
-        __import__("gi.repository." + n)
-        raise SystemExit(0)
-    except (ValueError, ImportError):
-        pass
-raise SystemExit(1)
-PY
-}
-install_indicator() {
-  has_indicator && return 0
-  [ -n "$INDICATOR_TRIED" ] && return 1
-  INDICATOR_TRIED=1
-  log "tray: installing the AppIndicator library (the icon is invisible on GNOME/KDE without it)"
+# is invisible there, and always on Wayland (Ubuntu 25.10 has no X11 session at all). Desktop installs often
+# lack the GTK 3 / AppIndicator Python bindings, so the agent installs them once.
+# The checks only look for the libraries (gi.require_version); importing Gtk as root without a display can fail.
+gi_has() { python3 -c "import gi, sys; gi.require_version(sys.argv[1], sys.argv[2])" "$1" "$2" >/dev/null 2>&1; }
+has_gtk() { gi_has Gtk 3.0; }
+has_indicator() { gi_has AyatanaAppIndicator3 0.1 || gi_has AppIndicator3 0.1; }
+pkg_try() { # install the first package of a list that works
   local p
-  if command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    for p in gir1.2-ayatanaappindicator3-0.1 gir1.2-appindicator3-0.1; do
-      timeout 600 apt-get install -y -q "$p" >/dev/null 2>&1 && break
-      # stale package lists: refresh once, then retry
-      [ -z "$APT_UPDATED" ] && { APT_UPDATED=1; timeout 600 apt-get update -q >/dev/null 2>&1; timeout 600 apt-get install -y -q "$p" >/dev/null 2>&1 && break; }
-    done
-  elif command -v dnf >/dev/null 2>&1; then
-    for p in libayatana-appindicator-gtk3 libappindicator-gtk3; do timeout 600 dnf install -y -q "$p" >/dev/null 2>&1 && break; done
-  elif command -v zypper >/dev/null 2>&1; then
-    for p in typelib-1_0-AyatanaAppIndicator3-0_1 typelib-1_0-AppIndicator3-0_1; do timeout 600 zypper -n -q install "$p" >/dev/null 2>&1 && break; done
-  elif command -v pacman >/dev/null 2>&1; then
-    timeout 600 pacman -S --noconfirm --needed libayatana-appindicator >/dev/null 2>&1
-  fi
-  if has_indicator; then log "tray: AppIndicator library installed"; return 0; fi
-  log "tray: couldn't install the AppIndicator library; the icon may not show on GNOME/KDE"
+  for p in "$@"; do
+    case "$PM" in
+      apt) timeout 600 apt-get -o DPkg::Lock::Timeout=180 install -y -q "$p" >/dev/null 2>&1 && return 0
+           [ -z "$APT_UPDATED" ] && { APT_UPDATED=1; timeout 600 apt-get -o DPkg::Lock::Timeout=180 update -q >/dev/null 2>&1; timeout 600 apt-get -o DPkg::Lock::Timeout=180 install -y -q "$p" >/dev/null 2>&1 && return 0; } ;;
+      dnf) timeout 600 dnf install -y -q "$p" >/dev/null 2>&1 && return 0 ;;
+      zypper) timeout 600 zypper -n -q install "$p" >/dev/null 2>&1 && return 0 ;;
+      pacman) timeout 600 pacman -S --noconfirm --needed "$p" >/dev/null 2>&1 && return 0 ;;
+    esac
+  done
   return 1
+}
+install_tray_deps() {
+  has_gtk && has_indicator && return 0
+  [ -n "$TRAY_DEPS_TRIED" ] && return 1
+  TRAY_DEPS_TRIED=1
+  export DEBIAN_FRONTEND=noninteractive
+  PM=""
+  for p in apt-get:apt dnf:dnf zypper:zypper pacman:pacman; do command -v "${p%%:*}" >/dev/null 2>&1 && { PM="${p#*:}"; break; }; done
+  [ -n "$PM" ] || { log "tray: no supported package manager to install the icon's libraries"; return 1; }
+  log "tray: installing the libraries the icon needs ($PM)"
+  if ! has_gtk; then
+    case "$PM" in
+      apt) pkg_try python3-gi; pkg_try gir1.2-gtk-3.0 ;;
+      dnf) pkg_try python3-gobject; pkg_try gtk3 ;;
+      zypper) pkg_try python3-gobject python3-gobject-Gdk; pkg_try typelib-1_0-Gtk-3_0 ;;
+      pacman) pkg_try python-gobject; pkg_try gtk3 ;;
+    esac
+  fi
+  if ! has_indicator; then
+    case "$PM" in
+      apt) pkg_try gir1.2-ayatanaappindicator3-0.1 gir1.2-appindicator3-0.1 ;;
+      dnf) pkg_try libayatana-appindicator-gtk3 libappindicator-gtk3 ;;
+      zypper) pkg_try typelib-1_0-AyatanaAppIndicator3-0_1 typelib-1_0-AppIndicator3-0_1 ;;
+      pacman) pkg_try libayatana-appindicator ;;
+    esac
+  fi
+  command -v notify-send >/dev/null 2>&1 || case "$PM" in apt) pkg_try libnotify-bin ;; dnf|zypper|pacman) pkg_try libnotify ;; esac
+  has_gtk || { log "tray: GTK 3 for Python still missing after install (python3-gi / gir1.2-gtk-3.0)"; return 1; }
+  has_indicator || { log "tray: AppIndicator library still missing; the icon won't show on GNOME/KDE"; return 1; }
+  log "tray: libraries installed"
+  return 0
 }
 install_tray() { # <version>; empty = icon disabled on the server
   local v="$1"
   if [ -z "$v" ]; then [ -e "$TRAY_PY" ] && { remove_tray; log "tray icon removed (disabled on server)"; }; return 0; fi
-  has_desktop || return 0
-  if ! python3 -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' >/dev/null 2>&1; then
-    log "tray icon skipped: python3 with GTK 3 (python3-gi) is not installed"; return 0
-  fi
+  has_desktop || { log "tray icon skipped: no graphical desktop installed"; return 0; }
+  command -v python3 >/dev/null 2>&1 || { log "tray icon skipped: python3 is not installed"; return 0; }
   local changed=0
-  if ! has_indicator && install_indicator; then
-    # icons already running fell back to the invisible old-style tray: restart them
+  if ! has_gtk || ! has_indicator; then
+    install_tray_deps
+    # icons already running fell back to the invisible old-style tray (or couldn't start): restart them
     pkill -f "$TRAY_PY" 2>/dev/null; changed=1
   fi
+  has_gtk || { log "tray icon skipped: python3 with GTK 3 (python3-gi, gir1.2-gtk-3.0) is not installed"; return 0; }
   if [ "$(sha256sum "$TRAY_PY" 2>/dev/null | cut -c1-12)" != "$v" ]; then
     mkdir -p "$TRAY_DIR" && chmod 755 "$TRAY_DIR"
     curl -fsS --max-time 60 -o "$TRAY_PY.new" "$SERVER/agent/tray-linux.py" || { rm -f "$TRAY_PY.new"; return 0; }
